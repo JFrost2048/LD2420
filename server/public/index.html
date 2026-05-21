@@ -1,0 +1,535 @@
+<!DOCTYPE html>
+<html lang="ko">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>LD2420 Position Monitor</title>
+  <style>
+    :root {
+      --bg: #eef3e8;
+      --panel: #fffdf7;
+      --ink: #172019;
+      --accent: #0f766e;
+      --accent-soft: #b7e6db;
+      --danger: #c2410c;
+      --grid: #d7dfd1;
+      --sensor: #334155;
+      --person: #d9480f;
+    }
+
+    * {
+      box-sizing: border-box;
+    }
+
+    body {
+      margin: 0;
+      font-family: "Segoe UI", "Noto Sans KR", sans-serif;
+      background:
+        radial-gradient(circle at top left, #f8f4d6 0, transparent 25%),
+        linear-gradient(135deg, #edf4ea 0%, #dfe9df 100%);
+      color: var(--ink);
+    }
+
+    .page {
+      max-width: 1280px;
+      margin: 0 auto;
+      padding: 24px;
+      display: grid;
+      gap: 20px;
+    }
+
+    .hero,
+    .panel {
+      background: rgba(255, 253, 247, 0.92);
+      backdrop-filter: blur(10px);
+      border: 1px solid rgba(23, 32, 25, 0.08);
+      border-radius: 22px;
+      box-shadow: 0 18px 50px rgba(23, 32, 25, 0.08);
+    }
+
+    .hero {
+      padding: 20px 24px;
+    }
+
+    h1, h2, h3 {
+      margin: 0;
+    }
+
+    .subtitle {
+      margin: 8px 0 0;
+      color: #48574a;
+    }
+
+    .layout {
+      display: grid;
+      grid-template-columns: minmax(360px, 1.5fr) minmax(320px, 1fr);
+      gap: 20px;
+    }
+
+    .panel {
+      padding: 18px;
+    }
+
+    .stack {
+      display: grid;
+      gap: 20px;
+    }
+
+    canvas {
+      width: 100%;
+      height: auto;
+      display: block;
+      background:
+        linear-gradient(0deg, rgba(183, 230, 219, 0.22), rgba(183, 230, 219, 0.22)),
+        #fff;
+      border-radius: 16px;
+      border: 1px solid rgba(23, 32, 25, 0.08);
+    }
+
+    .stats {
+      display: grid;
+      grid-template-columns: repeat(2, minmax(0, 1fr));
+      gap: 12px;
+      margin-bottom: 16px;
+    }
+
+    .stat {
+      padding: 12px;
+      background: #f5f7ef;
+      border-radius: 14px;
+    }
+
+    .label {
+      display: block;
+      font-size: 12px;
+      color: #5a6a5d;
+      margin-bottom: 6px;
+    }
+
+    .value {
+      font-size: 22px;
+      font-weight: 700;
+    }
+
+    .sensor-list {
+      display: grid;
+      gap: 10px;
+    }
+
+    .sensor-card {
+      background: #f7f8f4;
+      border-radius: 14px;
+      padding: 12px;
+      border: 1px solid rgba(23, 32, 25, 0.06);
+    }
+
+    .sensor-head {
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+      margin-bottom: 8px;
+      font-weight: 700;
+    }
+
+    .badge {
+      padding: 4px 8px;
+      border-radius: 999px;
+      font-size: 12px;
+      background: #e8ece6;
+    }
+
+    .badge.live {
+      background: var(--accent-soft);
+      color: #0b534e;
+    }
+
+    .badge.offline {
+      background: #f8d7cc;
+      color: var(--danger);
+    }
+
+    .meta {
+      margin: 4px 0;
+      font-size: 14px;
+      color: #465247;
+    }
+
+    .config-form {
+      display: grid;
+      gap: 12px;
+    }
+
+    .config-grid {
+      display: grid;
+      grid-template-columns: repeat(2, minmax(0, 1fr));
+      gap: 10px;
+    }
+
+    .config-grid.sensor-grid {
+      grid-template-columns: 1fr 1fr 1fr;
+    }
+
+    .field {
+      display: grid;
+      gap: 6px;
+    }
+
+    .field label {
+      font-size: 13px;
+      color: #5a6a5d;
+    }
+
+    .field input {
+      width: 100%;
+      padding: 10px 12px;
+      border: 1px solid rgba(23, 32, 25, 0.12);
+      border-radius: 12px;
+      background: #fcfcf8;
+      color: var(--ink);
+      font: inherit;
+    }
+
+    .field input:disabled {
+      background: #eef2ea;
+      color: #5b665d;
+    }
+
+    .config-actions {
+      display: flex;
+      gap: 10px;
+      align-items: center;
+      flex-wrap: wrap;
+    }
+
+    .button {
+      padding: 10px 14px;
+      border: 0;
+      border-radius: 12px;
+      background: var(--accent);
+      color: white;
+      font: inherit;
+      font-weight: 700;
+      cursor: pointer;
+    }
+
+    .button.secondary {
+      background: #dde7db;
+      color: #294133;
+    }
+
+    .status {
+      font-size: 14px;
+      color: #465247;
+    }
+
+    @media (max-width: 920px) {
+      .layout {
+        grid-template-columns: 1fr;
+      }
+
+      .config-grid,
+      .config-grid.sensor-grid,
+      .stats {
+        grid-template-columns: 1fr;
+      }
+    }
+  </style>
+</head>
+<body>
+  <main class="page">
+    <section class="hero">
+      <h1>LD2420 Position Monitor</h1>
+      <p class="subtitle">ESP32 4대의 레이더 값을 모아서 방 안 위치를 추정합니다.</p>
+    </section>
+
+    <section class="layout">
+      <section class="panel">
+        <div class="stats">
+          <div class="stat">
+            <span class="label">추정 좌표</span>
+            <span class="value" id="positionValue">대기 중</span>
+          </div>
+          <div class="stat">
+            <span class="label">신뢰도</span>
+            <span class="value" id="confidenceValue">-</span>
+          </div>
+        </div>
+        <canvas id="roomCanvas" width="800" height="640"></canvas>
+      </section>
+
+      <aside class="stack">
+        <section class="panel">
+          <h2>센서 상태</h2>
+          <div id="sensorList" class="sensor-list"></div>
+        </section>
+
+        <section class="panel">
+          <h2>배치 설정</h2>
+          <form id="configForm" class="config-form">
+            <div class="config-grid">
+              <div class="field">
+                <label for="roomWidth">방 너비 (cm)</label>
+                <input id="roomWidth" name="roomWidth" type="number" min="50" step="10">
+              </div>
+              <div class="field">
+                <label for="roomHeight">방 높이 (cm)</label>
+                <input id="roomHeight" name="roomHeight" type="number" min="50" step="10">
+              </div>
+              <div class="field">
+                <label for="gridStep">계산 간격 (cm)</label>
+                <input id="gridStep" name="gridStep" type="number" min="5" step="5">
+              </div>
+              <div class="field">
+                <label for="smoothing">부드럽게 (0~1)</label>
+                <input id="smoothing" name="smoothing" type="number" min="0" max="1" step="0.05">
+              </div>
+            </div>
+
+            <div id="sensorConfigList" class="sensor-list"></div>
+
+            <div class="config-actions">
+              <button class="button" type="submit">설정 저장</button>
+              <button class="button secondary" type="button" id="reloadConfigButton">현재값 다시 불러오기</button>
+              <span id="configStatus" class="status"></span>
+            </div>
+          </form>
+        </section>
+      </aside>
+    </section>
+  </main>
+
+  <script>
+    const canvas = document.getElementById("roomCanvas");
+    const ctx = canvas.getContext("2d");
+    const sensorList = document.getElementById("sensorList");
+    const positionValue = document.getElementById("positionValue");
+    const confidenceValue = document.getElementById("confidenceValue");
+    const configForm = document.getElementById("configForm");
+    const sensorConfigList = document.getElementById("sensorConfigList");
+    const reloadConfigButton = document.getElementById("reloadConfigButton");
+    const configStatus = document.getElementById("configStatus");
+
+    let lastState = null;
+
+    async function loadState() {
+      const response = await fetch("/api/state", { cache: "no-store" });
+      return response.json();
+    }
+
+    async function saveConfig(payload) {
+      const response = await fetch("/api/config", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(payload),
+      });
+      return response.json();
+    }
+
+    function drawRoom(state) {
+      const room = state.room;
+      const padding = 40;
+      const width = canvas.width - padding * 2;
+      const height = canvas.height - padding * 2;
+      const scaleX = width / room.width_cm;
+      const scaleY = height / room.height_cm;
+
+      ctx.clearRect(0, 0, canvas.width, canvas.height);
+      ctx.fillStyle = "#fffdf7";
+      ctx.fillRect(0, 0, canvas.width, canvas.height);
+
+      ctx.strokeStyle = "#d7dfd1";
+      ctx.lineWidth = 1;
+      for (let x = 0; x <= room.width_cm; x += 50) {
+        const px = padding + x * scaleX;
+        ctx.beginPath();
+        ctx.moveTo(px, padding);
+        ctx.lineTo(px, padding + height);
+        ctx.stroke();
+      }
+      for (let y = 0; y <= room.height_cm; y += 50) {
+        const py = padding + y * scaleY;
+        ctx.beginPath();
+        ctx.moveTo(padding, py);
+        ctx.lineTo(padding + width, py);
+        ctx.stroke();
+      }
+
+      ctx.strokeStyle = "#172019";
+      ctx.lineWidth = 3;
+      ctx.strokeRect(padding, padding, width, height);
+
+      for (const sensor of state.sensors) {
+        const x = padding + sensor.x_cm * scaleX;
+        const y = padding + sensor.y_cm * scaleY;
+
+        if (sensor.selected_distance_cm) {
+          ctx.beginPath();
+          ctx.strokeStyle = "rgba(15, 118, 110, 0.22)";
+          ctx.lineWidth = 2;
+          ctx.arc(x, y, sensor.selected_distance_cm * ((scaleX + scaleY) / 2) / 2, 0, Math.PI * 2);
+          ctx.stroke();
+        }
+
+        ctx.beginPath();
+        ctx.fillStyle = sensor.present ? "#0f766e" : "#64748b";
+        ctx.arc(x, y, 8, 0, Math.PI * 2);
+        ctx.fill();
+
+        ctx.fillStyle = "#172019";
+        ctx.font = "14px Segoe UI";
+        ctx.fillText(sensor.id, x + 12, y - 12);
+      }
+
+      if (state.estimate) {
+        const px = padding + state.estimate.x_cm * scaleX;
+        const py = padding + state.estimate.y_cm * scaleY;
+
+        ctx.beginPath();
+        ctx.fillStyle = "#d9480f";
+        ctx.arc(px, py, 10, 0, Math.PI * 2);
+        ctx.fill();
+
+        ctx.beginPath();
+        ctx.strokeStyle = "rgba(217, 72, 15, 0.25)";
+        ctx.lineWidth = 18;
+        ctx.arc(px, py, 18, 0, Math.PI * 2);
+        ctx.stroke();
+      }
+    }
+
+    function renderSensors(state) {
+      sensorList.innerHTML = "";
+
+      for (const sensor of state.sensors) {
+        const card = document.createElement("div");
+        card.className = "sensor-card";
+
+        const live = sensor.age_ms !== null && sensor.age_ms < 3000;
+        card.innerHTML = `
+          <div class="sensor-head">
+            <span>${sensor.id}</span>
+            <span class="badge ${live ? "live" : "offline"}">${live ? "LIVE" : "OFFLINE"}</span>
+          </div>
+          <p class="meta">위치: (${sensor.x_cm}, ${sensor.y_cm}) cm</p>
+          <p class="meta">존재 감지: ${sensor.present ? "예" : "아니오"}</p>
+          <p class="meta">이동 거리: ${sensor.moving_distance_cm} cm / 에너지 ${sensor.moving_energy}</p>
+          <p class="meta">정지 거리: ${sensor.stationary_distance_cm} cm / 에너지 ${sensor.stationary_energy}</p>
+          <p class="meta">사용 거리: ${sensor.selected_distance_cm ?? "-"}</p>
+        `;
+        sensorList.appendChild(card);
+      }
+    }
+
+    function renderSummary(state) {
+      if (!state.estimate) {
+        positionValue.textContent = "대기 중";
+        confidenceValue.textContent = "-";
+        return;
+      }
+
+      positionValue.textContent = `${state.estimate.x_cm} cm, ${state.estimate.y_cm} cm`;
+      confidenceValue.textContent = `${Math.round(state.estimate.confidence * 100)}%`;
+    }
+
+    function renderConfigForm(state) {
+      document.getElementById("roomWidth").value = state.room.width_cm;
+      document.getElementById("roomHeight").value = state.room.height_cm;
+      document.getElementById("gridStep").value = state.room.grid_step_cm;
+      document.getElementById("smoothing").value = state.room.smoothing;
+
+      sensorConfigList.innerHTML = "";
+      for (const sensor of state.sensors) {
+        const block = document.createElement("div");
+        block.className = "sensor-card";
+        block.innerHTML = `
+          <div class="sensor-head">
+            <span>${sensor.id}</span>
+          </div>
+          <div class="config-grid sensor-grid">
+            <div class="field">
+              <label for="${sensor.id}-x">X 위치 (cm)</label>
+              <input id="${sensor.id}-x" type="number" step="1" value="${sensor.x_cm}">
+            </div>
+            <div class="field">
+              <label for="${sensor.id}-y">Y 위치 (cm)</label>
+              <input id="${sensor.id}-y" type="number" step="1" value="${sensor.y_cm}">
+            </div>
+            <div class="field">
+              <label>ID</label>
+              <input type="text" value="${sensor.id}" disabled>
+            </div>
+          </div>
+        `;
+        sensorConfigList.appendChild(block);
+      }
+    }
+
+    function collectConfigPayload() {
+      const sensors = lastState.sensors.map((sensor) => ({
+        id: sensor.id,
+        x_cm: Number(document.getElementById(`${sensor.id}-x`).value),
+        y_cm: Number(document.getElementById(`${sensor.id}-y`).value),
+      }));
+
+      return {
+        room: {
+          width_cm: Number(document.getElementById("roomWidth").value),
+          height_cm: Number(document.getElementById("roomHeight").value),
+          grid_step_cm: Number(document.getElementById("gridStep").value),
+          smoothing: Number(document.getElementById("smoothing").value),
+        },
+        sensors,
+      };
+    }
+
+    async function tick() {
+      try {
+        const state = await loadState();
+        const shouldRenderConfig = !lastState;
+        lastState = state;
+        drawRoom(state);
+        renderSensors(state);
+        renderSummary(state);
+        if (shouldRenderConfig) {
+          renderConfigForm(state);
+        }
+      } catch (error) {
+        console.error(error);
+      }
+    }
+
+    configForm.addEventListener("submit", async (event) => {
+      event.preventDefault();
+      if (!lastState) {
+        return;
+      }
+
+      configStatus.textContent = "저장 중...";
+      try {
+        const result = await saveConfig(collectConfigPayload());
+        if (!result.ok) {
+          configStatus.textContent = `저장 실패: ${result.error}`;
+          return;
+        }
+
+        configStatus.textContent = "저장 완료";
+        lastState = null;
+        await tick();
+      } catch (error) {
+        console.error(error);
+        configStatus.textContent = "저장 실패";
+      }
+    });
+
+    reloadConfigButton.addEventListener("click", async () => {
+      configStatus.textContent = "현재값 다시 불러오는 중...";
+      lastState = null;
+      await tick();
+      configStatus.textContent = "현재값 반영됨";
+    });
+
+    tick();
+    setInterval(tick, 500);
+  </script>
+</body>
+</html>
