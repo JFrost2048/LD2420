@@ -310,6 +310,7 @@
     const configStatus = document.getElementById("configStatus");
 
     let lastState = null;
+    let configFormSensorIds = "";
 
     async function loadState() {
       const response = await fetch("/api/state", { cache: "no-store" });
@@ -322,7 +323,11 @@
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify(payload),
       });
-      return response.json();
+      const result = await response.json();
+      if (!response.ok && result.ok !== false) {
+        result.ok = false;
+      }
+      return result;
     }
 
     function drawRoom(state) {
@@ -462,6 +467,19 @@
         `;
         sensorConfigList.appendChild(block);
       }
+      configFormSensorIds = getSensorIdSignature(state);
+    }
+
+    function getSensorIdSignature(state) {
+      return state.sensors.map((sensor) => sensor.id).join("|");
+    }
+
+    function shouldRenderConfigForm(state) {
+      if (!lastState) {
+        return true;
+      }
+
+      return configFormSensorIds !== getSensorIdSignature(state);
     }
 
     function collectConfigPayload() {
@@ -485,7 +503,7 @@
     async function tick() {
       try {
         const state = await loadState();
-        const shouldRenderConfig = !lastState;
+        const shouldRenderConfig = shouldRenderConfigForm(state);
         lastState = state;
         drawRoom(state);
         renderSensors(state);

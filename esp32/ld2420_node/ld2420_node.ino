@@ -1,11 +1,11 @@
 #include <WiFi.h>
 #include <WiFiClient.h>
 #include <HTTPClient.h>
-const char* WIFI_SSID = "YOUR_WIFI_NAME";
-const char* WIFI_PASSWORD = "YOUR_WIFI_PASSWORD";
-const char* SERVER_HOST = "YOUR_SERVER_IP";
+const char* WIFI_SSID = "csi-wifi";
+const char* WIFI_PASSWORD = "00000000";
+const char* SERVER_HOST = "192.168.1.144";
 const uint16_t SERVER_PORT = 8080;
-const char* SENSOR_ID = "sensor-a";
+const char* SENSOR_ID = "2";
 // For this LD2420 variant, OT1/OT2 appear to be one-way UART-style outputs.
 // Start with OT1 -> ESP32 RX pin. If no data comes in, move the OT wire to OT2.
 static const int RADAR_RX_PIN = 16;
