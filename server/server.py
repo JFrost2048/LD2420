@@ -1,9 +1,10 @@
 import json
 import math
-import re
+import queue
 import shutil
 import socket
 import subprocess
+import tempfile
 import threading
 import time
 import uuid
@@ -21,13 +22,89 @@ CONFIG_PATH = BASE_DIR / "config.json"
 CALIBRATION_PATH = BASE_DIR / "calibration_samples.jsonl"
 PROJECT_DIR = BASE_DIR.parent
 FIRMWARE_SOURCE_PATH = PROJECT_DIR / "esp32" / "ld2420_node" / "ld2420_node.ino"
-FLASH_WORK_DIR = BASE_DIR / ".flash_work"
 ARDUINO_CLI_CANDIDATES = [
     Path("C:/Program Files/Arduino CLI/arduino-cli.exe"),
     Path.home() / "AppData/Local/Programs/Arduino IDE/resources/app/lib/backend/resources/arduino-cli.exe",
 ]
 FIRMWARE_JOBS = {}
 FIRMWARE_JOBS_LOCK = threading.Lock()
+
+
+def sensor_name_from_config(item: dict) -> str:
+    return str(item.get("name") or item.get("id") or "").strip()
+
+
+def normalize_room(room: dict) -> dict:
+    return {
+        "width_cm": max(50, int(room["width_cm"])),
+        "height_cm": max(50, int(room["height_cm"])),
+        "grid_step_cm": max(5, int(room.get("grid_step_cm", 10))),
+        "smoothing": min(1.0, max(0.0, float(room.get("smoothing", 0.35)))),
+    }
+
+
+def normalize_sensor_config(item: dict, fallback_position: Optional[dict] = None) -> dict:
+    sensor_name = sensor_name_from_config(item)
+    if not sensor_name:
+        raise ValueError("Sensor name cannot be empty")
+
+    fallback_position = fallback_position or {"x_cm": 30, "y_cm": 30}
+    label = str(item.get("label") or item.get("name") or sensor_name).strip() or sensor_name
+    return {
+        "id": sensor_name,
+        "name": sensor_name,
+        "label": label,
+        "x_cm": int(item.get("x_cm", fallback_position["x_cm"])),
+        "y_cm": int(item.get("y_cm", fallback_position["y_cm"])),
+    }
+
+
+def normalize_config(config: dict) -> dict:
+    room = normalize_room(config["room"])
+    server = dict(config.get("server", {"host": "0.0.0.0", "port": 8080}))
+    sensors = []
+    seen = set()
+    raw_sensors = config.get("sensors", [])
+    if isinstance(raw_sensors, dict):
+        sensor_items = []
+        for sensor_name, item in raw_sensors.items():
+            sensor_item = dict(item or {})
+            sensor_item.setdefault("name", sensor_name)
+            sensor_item.setdefault("id", sensor_name)
+            sensor_items.append(sensor_item)
+    else:
+        sensor_items = list(raw_sensors)
+
+    for item in sensor_items:
+        sensor = normalize_sensor_config(item)
+        if sensor["id"] in seen:
+            continue
+        sensors.append(sensor)
+        seen.add(sensor["id"])
+
+    return {
+        "room": room,
+        "server": server,
+        "sensors": sensors,
+    }
+
+
+def config_for_disk(config: dict) -> dict:
+    normalized = normalize_config(config)
+    sensors = {}
+    for sensor in normalized["sensors"]:
+        sensor_name = sensor["name"]
+        sensors[sensor_name] = {
+            "label": sensor["label"],
+            "x_cm": sensor["x_cm"],
+            "y_cm": sensor["y_cm"],
+        }
+
+    return {
+        "room": normalized["room"],
+        "server": normalized["server"],
+        "sensors": sensors,
+    }
 
 
 def load_config() -> dict:
@@ -38,7 +115,7 @@ def load_config() -> dict:
         )
 
     with CONFIG_PATH.open("r", encoding="utf-8") as handle:
-        return json.load(handle)
+        return normalize_config(json.load(handle))
 
 
 CONFIG = load_config()
@@ -46,7 +123,7 @@ CONFIG = load_config()
 
 def save_config(config: dict) -> None:
     with CONFIG_PATH.open("w", encoding="utf-8") as handle:
-        json.dump(config, handle, ensure_ascii=False, indent=2)
+        json.dump(config_for_disk(config), handle, ensure_ascii=False, indent=2)
         handle.write("\n")
 
 
@@ -143,29 +220,65 @@ def list_serial_ports() -> List[dict]:
     return ports
 
 
-def replace_cpp_string(source: str, name: str, value: str) -> str:
-    escaped = value.replace("\\", "\\\\").replace('"', '\\"')
-    pattern = rf'const\s+char\*\s+{re.escape(name)}\s*=\s*"[^"]*";'
-    replacement = f'const char* {name} = "{escaped}";'
-    return re.sub(pattern, replacement, source)
-
-
 def command_output(*parts: object) -> str:
     return "".join(str(part or "") for part in parts)
 
 
-def prepare_firmware(sensor_id: str, wifi_ssid: str, wifi_password: str, server_host: str) -> Path:
-    source = FIRMWARE_SOURCE_PATH.read_text(encoding="utf-8")
-    source = replace_cpp_string(source, "WIFI_SSID", wifi_ssid)
-    source = replace_cpp_string(source, "WIFI_PASSWORD", wifi_password)
-    source = replace_cpp_string(source, "SERVER_HOST", server_host)
-    source = replace_cpp_string(source, "SENSOR_ID", sensor_id)
+def provision_firmware(port: str, payload: dict) -> str:
+    lines = [
+        "PROVISION_BEGIN",
+        f"sensor_id={str(payload.get('sensor_id', '')).strip()}",
+        f"wifi_ssid={str(payload.get('wifi_ssid', '')).strip()}",
+        f"wifi_password={str(payload.get('wifi_password', ''))}",
+        f"server_host={str(payload.get('server_host', '')).strip() or get_lan_ip()}",
+        f"server_port={int(payload.get('server_port', 8080) or 8080)}",
+        f"post_interval_ms={int(payload.get('post_interval_ms', 300) or 300)}",
+        "PROVISION_END",
+    ]
 
-    sketch_dir = FLASH_WORK_DIR / f"ld2420_node_{uuid.uuid4().hex[:8]}"
-    sketch_dir.mkdir(parents=True, exist_ok=False)
-    sketch_path = sketch_dir / f"{sketch_dir.name}.ino"
-    sketch_path.write_text(source, encoding="utf-8")
-    return sketch_dir
+    with tempfile.NamedTemporaryFile("w", encoding="utf-8", delete=False, newline="\n") as handle:
+        provision_path = Path(handle.name)
+        handle.write("\n".join(lines))
+        handle.write("\n")
+
+    script = r"""
+$portName = $args[0]
+$linesPath = $args[1]
+$serial = New-Object System.IO.Ports.SerialPort $portName, 115200, ([System.IO.Ports.Parity]::None), 8, ([System.IO.Ports.StopBits]::One)
+$serial.NewLine = "`n"
+$serial.DtrEnable = $true
+$serial.RtsEnable = $true
+for ($attempt = 0; $attempt -lt 10; $attempt++) {
+  try {
+    $serial.Open()
+    break
+  } catch {
+    Start-Sleep -Milliseconds 1000
+  }
+}
+if (-not $serial.IsOpen) {
+  throw "Could not open serial port $portName for provisioning"
+}
+Start-Sleep -Milliseconds 2500
+Get-Content -LiteralPath $linesPath | ForEach-Object {
+  $serial.WriteLine($_)
+  Start-Sleep -Milliseconds 80
+}
+Start-Sleep -Milliseconds 500
+$serial.Close()
+"""
+    try:
+        result = subprocess.run(
+            ["powershell", "-NoProfile", "-Command", script, port, str(provision_path)],
+            capture_output=True,
+            text=True,
+            timeout=25,
+        )
+        if result.returncode != 0:
+            raise RuntimeError(command_output(result.stdout, result.stderr).strip())
+        return command_output(result.stdout, result.stderr)
+    finally:
+        provision_path.unlink(missing_ok=True)
 
 
 def run_firmware_job(job_id: str, payload: dict) -> None:
@@ -191,12 +304,10 @@ def run_firmware_job(job_id: str, payload: dict) -> None:
         update_firmware_job(job_id, status="failed", error="Missing Wi-Fi SSID")
         return
 
-    sketch_dir = None
     try:
-        sketch_dir = prepare_firmware(sensor_id, wifi_ssid, wifi_password, server_host)
         update_firmware_job(job_id, status="compiling")
 
-        compile_cmd = [str(cli), "compile", "--fqbn", fqbn, str(sketch_dir)]
+        compile_cmd = [str(cli), "compile", "--fqbn", fqbn, str(FIRMWARE_SOURCE_PATH.parent)]
         compile_result = subprocess.run(compile_cmd, capture_output=True, text=True, timeout=300)
         if compile_result.returncode != 0:
             update_firmware_job(
@@ -208,7 +319,7 @@ def run_firmware_job(job_id: str, payload: dict) -> None:
             return
 
         update_firmware_job(job_id, status="uploading")
-        upload_cmd = [str(cli), "upload", "-p", port, "--fqbn", fqbn, str(sketch_dir)]
+        upload_cmd = [str(cli), "upload", "-p", port, "--fqbn", fqbn, str(FIRMWARE_SOURCE_PATH.parent)]
         upload_result = subprocess.run(upload_cmd, capture_output=True, text=True, timeout=180)
         if upload_result.returncode != 0:
             update_firmware_job(
@@ -219,6 +330,9 @@ def run_firmware_job(job_id: str, payload: dict) -> None:
             )
             return
 
+        update_firmware_job(job_id, status="provisioning")
+        provision_output = provision_firmware(port, payload)
+
         update_firmware_job(
             job_id,
             status="done",
@@ -227,13 +341,11 @@ def run_firmware_job(job_id: str, payload: dict) -> None:
                 compile_result.stderr,
                 upload_result.stdout,
                 upload_result.stderr,
+                provision_output,
             )[-8000:],
         )
     except Exception as exc:
         update_firmware_job(job_id, status="failed", error=str(exc))
-    finally:
-        if sketch_dir is not None:
-            shutil.rmtree(sketch_dir, ignore_errors=True)
 
 
 def update_firmware_job(job_id: str, **updates: object) -> None:
@@ -243,107 +355,174 @@ def update_firmware_job(job_id: str, **updates: object) -> None:
         job["updated_at_ms"] = int(time.time() * 1000)
 
 
+SENSOR_STALE_MS = 3000
+SENSOR_FILTER_TAU_SEC = 0.65
+SENSOR_QUEUE_LIMIT = 8
+POSITION_INTERVAL_SEC = 0.10
+POSITION_MAX_SPEED_CM_SEC = 180.0
+
+
 @dataclass
-class SensorState:
-    sensor_id: str
-    last_update_ms: int = 0
-    device_timestamp_ms: int = 0
-    present: bool = False
-    moving: bool = False
-    stationary: bool = False
-    moving_distance_cm: int = 0
-    stationary_distance_cm: int = 0
-    moving_energy: int = 0
-    stationary_energy: int = 0
-    selected_distance_cm: Optional[float] = None
-    selected_weight: float = 0.0
-    last_remote_ip: Optional[str] = None
-
-    def update_from_payload(self, payload: dict) -> None:
-        self.last_update_ms = int(time.time() * 1000)
-        self.last_remote_ip = payload.get("_remote_ip")
-        self.device_timestamp_ms = int(payload.get("timestamp_ms", 0) or 0)
-        self.present = bool(payload.get("present", False))
-        self.moving = bool(payload.get("moving", False))
-        self.stationary = bool(payload.get("stationary", False))
-        self.moving_distance_cm = int(payload.get("moving_distance_cm", 0) or 0)
-        self.stationary_distance_cm = int(payload.get("stationary_distance_cm", 0) or 0)
-        self.moving_energy = int(payload.get("moving_energy", 0) or 0)
-        self.stationary_energy = int(payload.get("stationary_energy", 0) or 0)
-
-        self.selected_distance_cm, self.selected_weight = choose_measurement(self)
+class SensorReading:
+    present: bool
+    distance_cm: int
+    signal_strength: int
+    remote_ip: Optional[str]
+    device_timestamp_ms: int
+    received_ms: int
 
 
-def choose_measurement(sensor: SensorState) -> tuple[Optional[float], float]:
-    candidates = []
+class SensorNode:
+    def __init__(self, sensor_id: str) -> None:
+        self.sensor_id = sensor_id
+        self.lock = threading.Lock()
+        self.queue: queue.Queue[SensorReading] = queue.Queue(maxsize=SENSOR_QUEUE_LIMIT)
+        self.stop_event = threading.Event()
+        self.last_update_ms = 0
+        self.device_timestamp_ms = 0
+        self.present = False
+        self.raw_distance_cm = 0
+        self.signal_strength = 0
+        self.filtered_distance_cm: Optional[float] = None
+        self.base_weight = 0.0
+        self.last_remote_ip: Optional[str] = None
+        self.worker = threading.Thread(target=self._run, daemon=True)
+        self.worker.start()
 
-    if sensor.stationary and sensor.stationary_distance_cm > 0:
-        candidates.append(
-            (
-                float(sensor.stationary_distance_cm),
-                max(0.20, sensor.stationary_energy / 100.0),
-            )
+    def submit(self, payload: dict) -> None:
+        reading = SensorReading(
+            present=bool(payload.get("present", False)),
+            distance_cm=int(
+                payload.get(
+                    "distance_cm",
+                    max(
+                        int(payload.get("moving_distance_cm", 0) or 0),
+                        int(payload.get("stationary_distance_cm", 0) or 0),
+                    ),
+                )
+                or 0
+            ),
+            signal_strength=int(
+                payload.get(
+                    "signal_strength",
+                    max(
+                        int(payload.get("moving_energy", 0) or 0),
+                        int(payload.get("stationary_energy", 0) or 0),
+                    ),
+                )
+                or 0
+            ),
+            remote_ip=payload.get("_remote_ip"),
+            device_timestamp_ms=int(payload.get("timestamp_ms", 0) or 0),
+            received_ms=int(time.time() * 1000),
         )
+        if reading.signal_strength <= 0 and reading.present and reading.distance_cm > 0:
+            reading.signal_strength = 100
 
-    if sensor.moving and sensor.moving_distance_cm > 0:
-        candidates.append(
-            (
-                float(sensor.moving_distance_cm),
-                max(0.20, sensor.moving_energy / 100.0),
-            )
-        )
+        while self.queue.full():
+            try:
+                self.queue.get_nowait()
+            except queue.Empty:
+                break
+        self.queue.put_nowait(reading)
 
-    if not candidates and sensor.present:
-        fallback_distance = max(sensor.moving_distance_cm, sensor.stationary_distance_cm)
-        if fallback_distance > 0:
-            fallback_energy = max(sensor.moving_energy, sensor.stationary_energy, 20)
-            candidates.append((float(fallback_distance), fallback_energy / 100.0))
+    def stop(self) -> None:
+        self.stop_event.set()
 
-    if not candidates:
-        return None, 0.0
+    def _run(self) -> None:
+        while not self.stop_event.is_set():
+            try:
+                reading = self.queue.get(timeout=0.2)
+            except queue.Empty:
+                self._expire_if_stale()
+                continue
+            self._apply_reading(reading)
 
-    candidates.sort(key=lambda item: item[1], reverse=True)
-    return candidates[0]
+    def _apply_reading(self, reading: SensorReading) -> None:
+        with self.lock:
+            previous_ms = self.last_update_ms or reading.received_ms
+            dt_sec = max(0.001, (reading.received_ms - previous_ms) / 1000.0)
+            self.last_update_ms = reading.received_ms
+            self.device_timestamp_ms = reading.device_timestamp_ms
+            self.last_remote_ip = reading.remote_ip
+            self.raw_distance_cm = reading.distance_cm
+            self.signal_strength = reading.signal_strength
+
+            if not reading.present or reading.distance_cm <= 0:
+                self.present = False
+                self.filtered_distance_cm = None
+                self.base_weight = 0.0
+                return
+
+            alpha = 1.0 - math.exp(-dt_sec / SENSOR_FILTER_TAU_SEC)
+            if self.filtered_distance_cm is None:
+                self.filtered_distance_cm = float(reading.distance_cm)
+            else:
+                self.filtered_distance_cm += alpha * (
+                    float(reading.distance_cm) - self.filtered_distance_cm
+                )
+
+            self.present = True
+            self.base_weight = clamp(reading.signal_strength / 100.0, 0.20, 1.0)
+
+    def _expire_if_stale(self) -> None:
+        now_ms = int(time.time() * 1000)
+        with self.lock:
+            if self.last_update_ms and now_ms - self.last_update_ms > SENSOR_STALE_MS:
+                self.present = False
+                self.filtered_distance_cm = None
+                self.base_weight = 0.0
+
+    def get_distance(self, now_ms: Optional[int] = None) -> Optional[dict]:
+        now_ms = now_ms or int(time.time() * 1000)
+        with self.lock:
+            age_ms = now_ms - self.last_update_ms if self.last_update_ms else None
+            if (
+                age_ms is None
+                or age_ms > SENSOR_STALE_MS
+                or not self.present
+                or self.filtered_distance_cm is None
+            ):
+                return None
+
+            freshness = math.exp(-age_ms / 1200.0)
+            weight = self.base_weight * freshness
+            if weight <= 0.05:
+                return None
+
+            return {
+                "id": self.sensor_id,
+                "distance_cm": self.filtered_distance_cm,
+                "weight": weight,
+                "age_ms": age_ms,
+            }
+
+    def export_state(self, now_ms: int) -> dict:
+        with self.lock:
+            age_ms = now_ms - self.last_update_ms if self.last_update_ms else None
+            freshness = math.exp(-age_ms / 1200.0) if age_ms is not None else 0.0
+            selected_weight = self.base_weight * freshness if self.present else 0.0
+            return {
+                "present": self.present,
+                "distance_cm": self.raw_distance_cm,
+                "signal_strength": self.signal_strength,
+                "moving": self.present,
+                "stationary": False,
+                "moving_distance_cm": self.raw_distance_cm,
+                "stationary_distance_cm": 0,
+                "moving_energy": self.signal_strength,
+                "stationary_energy": 0,
+                "selected_distance_cm": self.filtered_distance_cm,
+                "selected_weight": selected_weight,
+                "last_remote_ip": self.last_remote_ip,
+                "last_update_ms": self.last_update_ms,
+                "device_timestamp_ms": self.device_timestamp_ms,
+                "age_ms": age_ms,
+            }
 
 
 def clamp(value: float, low: float, high: float) -> float:
     return min(high, max(low, value))
-
-
-def weighted_median(values: List[tuple[float, float]]) -> float:
-    if not values:
-        raise ValueError("weighted_median needs at least one value")
-
-    ordered = sorted(values, key=lambda item: item[0])
-    total_weight = sum(weight for _, weight in ordered)
-    midpoint = total_weight / 2.0
-    running = 0.0
-
-    for value, weight in ordered:
-        running += weight
-        if running >= midpoint:
-            return value
-
-    return ordered[-1][0]
-
-
-def robust_axis_value(values: List[tuple[float, float]], robust_radius_cm: float) -> tuple[float, float]:
-    center = weighted_median(values)
-    adjusted = []
-
-    for value, weight in values:
-        distance_from_center = abs(value - center)
-        robust_weight = weight / (1.0 + distance_from_center / robust_radius_cm)
-        adjusted.append((value, robust_weight))
-
-    total_weight = sum(weight for _, weight in adjusted)
-    if total_weight <= 0:
-        return center, 0.0
-
-    value = sum(value * weight for value, weight in adjusted) / total_weight
-    disagreement = sum(abs(value - center) * weight for value, weight in adjusted) / total_weight
-    confidence = 1.0 / (1.0 + disagreement / robust_radius_cm)
-    return value, confidence
 
 
 class Tracker:
@@ -351,20 +530,29 @@ class Tracker:
         self.lock = threading.Lock()
         self.room = {}
         self.sensor_positions = {}
-        self.sensor_states: Dict[str, SensorState] = {}
+        self.sensor_nodes: Dict[str, SensorNode] = {}
         self.last_estimate = None
+        self.stop_event = threading.Event()
         self.apply_config(config)
+        self.position_thread = threading.Thread(target=self._position_loop, daemon=True)
+        self.position_thread.start()
 
     def apply_config(self, config: dict) -> None:
         self.room = dict(config["room"])
-        self.sensor_positions = {item["id"]: dict(item) for item in config["sensors"]}
-        existing_states = self.sensor_states
-        self.sensor_states = {}
+        self.sensor_positions = {
+            sensor_name_from_config(item): normalize_sensor_config(item)
+            for item in config.get("sensors", [])
+            if sensor_name_from_config(item)
+        }
+        existing_nodes = self.sensor_nodes
+        self.sensor_nodes = {}
 
         for sensor_id in self.sensor_positions.keys():
-            self.sensor_states[sensor_id] = existing_states.get(
-                sensor_id, SensorState(sensor_id=sensor_id)
-            )
+            existing_node = existing_nodes.pop(sensor_id, None)
+            self.sensor_nodes[sensor_id] = existing_node or SensorNode(sensor_id)
+
+        for node in existing_nodes.values():
+            node.stop()
 
     def update_config(self, config: dict) -> None:
         with self.lock:
@@ -385,17 +573,18 @@ class Tracker:
         return {"x_cm": int(x_cm), "y_cm": int(y_cm)}
 
     def ensure_sensor(self, sensor_id: str) -> bool:
-        if sensor_id in self.sensor_states:
+        if sensor_id in self.sensor_nodes:
             return False
 
         position = self.default_sensor_position()
         self.sensor_positions[sensor_id] = {
             "id": sensor_id,
+            "name": sensor_id,
             "label": sensor_id,
             "x_cm": position["x_cm"],
             "y_cm": position["y_cm"],
         }
-        self.sensor_states[sensor_id] = SensorState(sensor_id=sensor_id)
+        self.sensor_nodes[sensor_id] = SensorNode(sensor_id=sensor_id)
         self.last_estimate = None
         return True
 
@@ -410,8 +599,8 @@ class Tracker:
 
         with self.lock:
             created = self.ensure_sensor(sensor_id)
-            self.sensor_states[sensor_id].update_from_payload(payload)
-            estimate = self.recalculate_estimate()
+            self.sensor_nodes[sensor_id].submit(payload)
+            estimate = self.last_estimate
             return {
                 "ok": True,
                 "sensor_id": sensor_id,
@@ -419,78 +608,139 @@ class Tracker:
                 "estimate": estimate,
             }
 
-    def build_axis_measurements(self, active: List[dict], width_cm: int, height_cm: int) -> dict:
-        measurements = {"x": [], "y": []}
-        edge_margin = max(80.0, min(width_cm, height_cm) * 0.08)
+    def _position_loop(self) -> None:
+        while not self.stop_event.is_set():
+            self.recalculate_estimate()
+            time.sleep(POSITION_INTERVAL_SEC)
 
-        for sensor in active:
-            x_cm = sensor["x_cm"]
-            y_cm = sensor["y_cm"]
-            distance_cm = sensor["distance_cm"]
-            edge_distances = {
-                "left": x_cm,
-                "right": width_cm - x_cm,
-                "top": y_cm,
-                "bottom": height_cm - y_cm,
-            }
-            wall = min(edge_distances, key=edge_distances.get)
-            wall_distance = edge_distances[wall]
+    def active_measurements(self) -> tuple[List[dict], int, int]:
+        now_ms = int(time.time() * 1000)
+        with self.lock:
+            width_cm = int(self.room["width_cm"])
+            height_cm = int(self.room["height_cm"])
+            positions = {sensor_id: dict(cfg) for sensor_id, cfg in self.sensor_positions.items()}
+            nodes = dict(self.sensor_nodes)
 
-            if wall_distance > edge_margin:
+        active = []
+        for sensor_id, node in nodes.items():
+            distance = node.get_distance(now_ms)
+            if distance is None:
                 continue
+            cfg = positions.get(sensor_id)
+            if cfg is None:
+                continue
+            active.append(
+                {
+                    "id": sensor_id,
+                    "x_cm": float(cfg["x_cm"]),
+                    "y_cm": float(cfg["y_cm"]),
+                    "distance_cm": float(distance["distance_cm"]),
+                    "weight": float(distance["weight"]),
+                    "age_ms": distance["age_ms"],
+                }
+            )
 
-            reliability = sensor["weight"] * clamp(250.0 / max(distance_cm, 50.0), 0.25, 4.0)
-            if wall == "left":
-                measurements["x"].append((clamp(x_cm + distance_cm, 0.0, width_cm), reliability))
-            elif wall == "right":
-                measurements["x"].append((clamp(x_cm - distance_cm, 0.0, width_cm), reliability))
-            elif wall == "top":
-                measurements["y"].append((clamp(y_cm + distance_cm, 0.0, height_cm), reliability))
-            elif wall == "bottom":
-                measurements["y"].append((clamp(y_cm - distance_cm, 0.0, height_cm), reliability))
+        return active, width_cm, height_cm
 
-        return measurements
-
-    def estimate_from_axis_measurements(
+    def estimate_from_two_circles(
         self,
         active: List[dict],
         width_cm: int,
         height_cm: int,
     ) -> Optional[dict]:
-        measurements = self.build_axis_measurements(active, width_cm, height_cm)
-        robust_radius_cm = max(150.0, min(width_cm, height_cm) * 0.04)
-
-        x_confidence = 0.0
-        y_confidence = 0.0
-
-        if measurements["x"]:
-            x_cm, x_confidence = robust_axis_value(measurements["x"], robust_radius_cm)
-        elif self.last_estimate is not None:
-            x_cm = float(self.last_estimate["x_cm"])
-        else:
-            x_cm = width_cm / 2.0
-
-        if measurements["y"]:
-            y_cm, y_confidence = robust_axis_value(measurements["y"], robust_radius_cm)
-        elif self.last_estimate is not None:
-            y_cm = float(self.last_estimate["y_cm"])
-        else:
-            y_cm = height_cm / 2.0
-
-        axis_count = int(bool(measurements["x"])) + int(bool(measurements["y"]))
-        if axis_count == 0:
+        first, second = active[0], active[1]
+        x0, y0, r0 = first["x_cm"], first["y_cm"], first["distance_cm"]
+        x1, y1, r1 = second["x_cm"], second["y_cm"], second["distance_cm"]
+        dx = x1 - x0
+        dy = y1 - y0
+        center_distance = math.hypot(dx, dy)
+        if center_distance <= 0:
             return None
 
-        coverage = 1.0 if axis_count == 2 else 0.45
-        confidence = coverage * max(0.05, (x_confidence + y_confidence) / max(axis_count, 1))
+        a = (r0 * r0 - r1 * r1 + center_distance * center_distance) / (2.0 * center_distance)
+        h_squared = r0 * r0 - a * a
+        base_x = x0 + a * dx / center_distance
+        base_y = y0 + a * dy / center_distance
 
+        if h_squared >= 0:
+            h = math.sqrt(h_squared)
+            rx = -dy / center_distance
+            ry = dx / center_distance
+            candidates = [
+                (base_x + h * rx, base_y + h * ry),
+                (base_x - h * rx, base_y - h * ry),
+            ]
+        else:
+            candidates = [(base_x, base_y)]
+
+        reference = (
+            (self.last_estimate["x_cm"], self.last_estimate["y_cm"])
+            if self.last_estimate is not None
+            else (width_cm / 2.0, height_cm / 2.0)
+        )
+        point = min(candidates, key=lambda item: math.dist(item, reference))
+        error = self.geometry_error(point, active)
+        confidence = 1.0 / (1.0 + error / 250.0)
         return {
-            "point": (clamp(x_cm, 0.0, width_cm), clamp(y_cm, 0.0, height_cm)),
+            "point": (clamp(point[0], 0.0, width_cm), clamp(point[1], 0.0, height_cm)),
             "confidence": confidence,
-            "best_error": 0.0,
-            "method": "axis_projection",
-            "axis_measurement_count": len(measurements["x"]) + len(measurements["y"]),
+            "best_error": error,
+            "method": "circle_intersection",
         }
+
+    def estimate_from_multilateration(
+        self,
+        active: List[dict],
+        width_cm: int,
+        height_cm: int,
+    ) -> Optional[dict]:
+        reference = max(active, key=lambda sensor: sensor["weight"])
+        ata00 = ata01 = ata11 = atb0 = atb1 = total_weight = 0.0
+        x0 = reference["x_cm"]
+        y0 = reference["y_cm"]
+        r0 = reference["distance_cm"]
+
+        for sensor in active:
+            if sensor is reference:
+                continue
+            xi = sensor["x_cm"]
+            yi = sensor["y_cm"]
+            ri = sensor["distance_cm"]
+            a0 = 2.0 * (xi - x0)
+            a1 = 2.0 * (yi - y0)
+            b = xi * xi + yi * yi - ri * ri - x0 * x0 - y0 * y0 + r0 * r0
+            weight = max(0.05, min(reference["weight"], sensor["weight"]))
+            ata00 += weight * a0 * a0
+            ata01 += weight * a0 * a1
+            ata11 += weight * a1 * a1
+            atb0 += weight * a0 * b
+            atb1 += weight * a1 * b
+            total_weight += weight
+
+        determinant = ata00 * ata11 - ata01 * ata01
+        if abs(determinant) < 1e-6 or total_weight <= 0:
+            return self.estimate_from_two_circles(active[:2], width_cm, height_cm)
+
+        x_cm = (atb0 * ata11 - atb1 * ata01) / determinant
+        y_cm = (ata00 * atb1 - ata01 * atb0) / determinant
+        point = (clamp(x_cm, 0.0, width_cm), clamp(y_cm, 0.0, height_cm))
+        error = self.geometry_error(point, active)
+        confidence = 1.0 / (1.0 + error / 250.0)
+        return {
+            "point": point,
+            "confidence": confidence,
+            "best_error": error,
+            "method": "weighted_multilateration",
+        }
+
+    def geometry_error(self, point: tuple[float, float], active: List[dict]) -> float:
+        total_weight = 0.0
+        total_error = 0.0
+        for sensor in active:
+            predicted = math.dist(point, (sensor["x_cm"], sensor["y_cm"]))
+            total_error += sensor["weight"] * abs(predicted - sensor["distance_cm"])
+            total_weight += sensor["weight"]
+        return total_error / max(total_weight, 0.001)
 
     def estimate_from_calibration(
         self,
@@ -549,63 +799,27 @@ class Tracker:
         }
 
     def recalculate_estimate(self) -> Optional[dict]:
-        active = []
+        active, width_cm, height_cm = self.active_measurements()
         now_ms = int(time.time() * 1000)
-
-        for sensor_id, state in self.sensor_states.items():
-            age_ms = now_ms - state.last_update_ms
-            if age_ms > 3000:
-                continue
-            if not state.present or state.selected_distance_cm is None:
-                continue
-
-            sensor_cfg = self.sensor_positions[sensor_id]
-            active.append(
-                {
-                    "id": sensor_id,
-                    "x_cm": float(sensor_cfg["x_cm"]),
-                    "y_cm": float(sensor_cfg["y_cm"]),
-                    "distance_cm": state.selected_distance_cm,
-                    "weight": state.selected_weight,
-                }
-            )
-
         if len(active) < 2:
-            self.last_estimate = None
+            with self.lock:
+                self.last_estimate = None
             return None
 
-        width_cm = int(self.room["width_cm"])
-        height_cm = int(self.room["height_cm"])
-        step_cm = max(5, int(self.room.get("grid_step_cm", 10)))
-
-        axis_estimate = self.estimate_from_axis_measurements(active, width_cm, height_cm)
-        if axis_estimate is not None:
-            best_point = axis_estimate["point"]
-            best_error = axis_estimate["best_error"]
-            confidence = axis_estimate["confidence"]
-            method = axis_estimate["method"]
-            axis_measurement_count = axis_estimate["axis_measurement_count"]
+        if len(active) == 2:
+            estimate = self.estimate_from_two_circles(active, width_cm, height_cm)
         else:
-            best_point = None
-            best_error = float("inf")
-            confidence = None
-            method = "radial_search"
-            axis_measurement_count = 0
+            estimate = self.estimate_from_multilateration(active, width_cm, height_cm)
 
-        if best_point is None:
-            best_point, best_error = self.estimate_from_radial_search(
-                active,
-                width_cm,
-                height_cm,
-                step_cm,
-            )
-
-        if best_point is None:
-            self.last_estimate = None
+        if estimate is None:
+            with self.lock:
+                self.last_estimate = None
             return None
 
-        if confidence is None:
-            confidence = 1.0 / (1.0 + (best_error / max(len(active), 1)))
+        best_point = estimate["point"]
+        best_error = estimate["best_error"]
+        confidence = estimate["confidence"]
+        method = estimate["method"]
 
         calibration_estimate = self.estimate_from_calibration(active, width_cm, height_cm)
         calibration_sample_count = 0
@@ -618,18 +832,20 @@ class Tracker:
             calibration_closest_error_cm = calibration_estimate["calibration_closest_error_cm"]
             method = f"{method}+calibration"
 
-        smoothing = float(self.room.get("smoothing", 0.35))
-        if self.last_estimate is None:
-            smoothed_x, smoothed_y = best_point
-        else:
-            smoothed_x = (
-                self.last_estimate["x_cm"] * (1.0 - smoothing) + best_point[0] * smoothing
-            )
-            smoothed_y = (
-                self.last_estimate["y_cm"] * (1.0 - smoothing) + best_point[1] * smoothing
-            )
+        with self.lock:
+            previous = self.last_estimate
+            smoothing = float(self.room.get("smoothing", 0.35))
 
-        self.last_estimate = {
+        smoothed_x, smoothed_y = self.stabilize_position(
+            best_point,
+            previous,
+            smoothing,
+            now_ms,
+            width_cm,
+            height_cm,
+        )
+
+        next_estimate = {
             "x_cm": round(smoothed_x, 1),
             "y_cm": round(smoothed_y, 1),
             "raw_x_cm": round(best_point[0], 1),
@@ -638,107 +854,64 @@ class Tracker:
             "uncalibrated_y_cm": round(uncalibrated_point[1], 1),
             "confidence": round(confidence, 4),
             "active_sensor_count": len(active),
-            "axis_measurement_count": axis_measurement_count,
             "calibration_sample_count": calibration_sample_count,
             "calibration_closest_error_cm": calibration_closest_error_cm,
             "method": method,
             "best_error": round(best_error, 2),
-            "updated_at_ms": int(time.time() * 1000),
+            "updated_at_ms": now_ms,
         }
-        return self.last_estimate
 
-    def estimate_from_radial_search(
+        with self.lock:
+            self.last_estimate = next_estimate
+        return next_estimate
+
+    def stabilize_position(
         self,
-        active: List[dict],
+        point: tuple[float, float],
+        previous: Optional[dict],
+        smoothing: float,
+        now_ms: int,
         width_cm: int,
         height_cm: int,
-        step_cm: int,
-    ) -> tuple[Optional[tuple[float, float]], float]:
-        best_point = None
-        best_error = float("inf")
+    ) -> tuple[float, float]:
+        if previous is None:
+            return point
 
-        def score(x_cm: float, y_cm: float) -> float:
-            total_error = 0.0
-            for sensor in active:
-                predicted = math.dist((x_cm, y_cm), (sensor["x_cm"], sensor["y_cm"]))
-                delta = predicted - sensor["distance_cm"]
-                total_error += sensor["weight"] * (delta * delta)
-            return total_error
+        dt_sec = max(0.001, (now_ms - int(previous.get("updated_at_ms", now_ms))) / 1000.0)
+        target_x = previous["x_cm"] * (1.0 - smoothing) + point[0] * smoothing
+        target_y = previous["y_cm"] * (1.0 - smoothing) + point[1] * smoothing
+        dx = target_x - previous["x_cm"]
+        dy = target_y - previous["y_cm"]
+        distance = math.hypot(dx, dy)
+        max_step = POSITION_MAX_SPEED_CM_SEC * dt_sec
 
-        seed_points = [
-            (width_cm / 2.0, height_cm / 2.0),
-            *(
-                (sensor["x_cm"], sensor["y_cm"])
-                for sensor in active
-            ),
-        ]
+        if distance > max_step > 0:
+            scale = max_step / distance
+            target_x = previous["x_cm"] + dx * scale
+            target_y = previous["y_cm"] + dy * scale
 
-        if self.last_estimate is not None:
-            seed_points.append((self.last_estimate["x_cm"], self.last_estimate["y_cm"]))
-
-        search_span = max(width_cm, height_cm) / 2.0
-
-        for seed_x, seed_y in seed_points:
-            x_cm = min(width_cm, max(0.0, float(seed_x)))
-            y_cm = min(height_cm, max(0.0, float(seed_y)))
-            candidate_error = score(x_cm, y_cm)
-            current_step = max(float(step_cm), search_span / 8.0)
-
-            while current_step >= step_cm:
-                improved = True
-                while improved:
-                    improved = False
-                    for dx in (-current_step, 0.0, current_step):
-                        for dy in (-current_step, 0.0, current_step):
-                            if dx == 0.0 and dy == 0.0:
-                                continue
-                            nx = min(width_cm, max(0.0, x_cm + dx))
-                            ny = min(height_cm, max(0.0, y_cm + dy))
-                            next_error = score(nx, ny)
-                            if next_error < candidate_error:
-                                x_cm = nx
-                                y_cm = ny
-                                candidate_error = next_error
-                                improved = True
-
-                current_step /= 2.0
-
-            if candidate_error < best_error:
-                best_error = candidate_error
-                best_point = (round(x_cm / step_cm) * step_cm, round(y_cm / step_cm) * step_cm)
-
-        if best_point is None:
-            return None, best_error
-
-        return best_point, best_error
+        return (
+            clamp(target_x, 0.0, width_cm),
+            clamp(target_y, 0.0, height_cm),
+        )
 
     def build_state(self) -> dict:
         with self.lock:
-            estimate = self.recalculate_estimate()
+            estimate = self.last_estimate
             now_ms = int(time.time() * 1000)
+            positions = {sensor_id: dict(cfg) for sensor_id, cfg in self.sensor_positions.items()}
+            nodes = dict(self.sensor_nodes)
             sensors = []
 
-            for sensor_id, cfg in self.sensor_positions.items():
-                state = self.sensor_states[sensor_id]
+            for sensor_id, cfg in positions.items():
+                state = nodes[sensor_id].export_state(now_ms)
                 sensors.append(
                     {
                         "id": sensor_id,
                         "label": cfg.get("label", sensor_id),
                         "x_cm": cfg["x_cm"],
                         "y_cm": cfg["y_cm"],
-                        "present": state.present,
-                        "moving": state.moving,
-                        "stationary": state.stationary,
-                        "moving_distance_cm": state.moving_distance_cm,
-                        "stationary_distance_cm": state.stationary_distance_cm,
-                        "moving_energy": state.moving_energy,
-                        "stationary_energy": state.stationary_energy,
-                        "selected_distance_cm": state.selected_distance_cm,
-                        "selected_weight": state.selected_weight,
-                        "last_remote_ip": state.last_remote_ip,
-                        "last_update_ms": state.last_update_ms,
-                        "device_timestamp_ms": state.device_timestamp_ms,
-                        "age_ms": now_ms - state.last_update_ms if state.last_update_ms else None,
+                        **state,
                     }
                 )
 
@@ -884,7 +1057,15 @@ class RequestHandler(BaseHTTPRequestHandler):
             sensors = []
             for index, sensor_id in enumerate(TRACKER.sensor_positions.keys()):
                 label, x_cm, y_cm = positions[index % len(positions)]
-                sensors.append({"id": sensor_id, "label": label, "x_cm": x_cm, "y_cm": y_cm})
+                sensors.append(
+                    {
+                        "id": sensor_id,
+                        "name": sensor_id,
+                        "label": label,
+                        "x_cm": x_cm,
+                        "y_cm": y_cm,
+                    }
+                )
 
         CONFIG = {
             "room": CONFIG["room"],
@@ -928,36 +1109,13 @@ class RequestHandler(BaseHTTPRequestHandler):
 
         try:
             payload = json.loads(raw.decode("utf-8"))
-            room = payload["room"]
-            sensors = payload["sensors"]
-
-            normalized_room = {
-                "width_cm": max(50, int(room["width_cm"])),
-                "height_cm": max(50, int(room["height_cm"])),
-                "grid_step_cm": max(5, int(room.get("grid_step_cm", 10))),
-                "smoothing": min(1.0, max(0.0, float(room.get("smoothing", 0.35)))),
-            }
-
-            normalized_sensors = []
-            for item in sensors:
-                sensor_id = str(item["id"])
-                if not sensor_id:
-                    raise ValueError("Sensor id cannot be empty")
-
-                normalized_sensors.append(
-                    {
-                        "id": sensor_id,
-                        "label": str(item.get("label", sensor_id)).strip() or sensor_id,
-                        "x_cm": int(item["x_cm"]),
-                        "y_cm": int(item["y_cm"]),
-                    }
-                )
-
-            CONFIG = {
-                "room": normalized_room,
-                "server": CONFIG["server"],
-                "sensors": normalized_sensors,
-            }
+            CONFIG = normalize_config(
+                {
+                    "room": payload["room"],
+                    "server": CONFIG["server"],
+                    "sensors": payload["sensors"],
+                }
+            )
             save_config(CONFIG)
             TRACKER.update_config(CONFIG)
             self.send_json({"ok": True, "config": CONFIG})

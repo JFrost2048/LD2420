@@ -232,7 +232,7 @@
   <main class="page">
     <section class="hero">
       <h1>LD2420 Position Monitor</h1>
-      <p class="subtitle">Auto-discover ESP sensors, manage labels, save calibration samples, and flash firmware from this page.</p>
+      <p class="subtitle">Auto-discover ESP sensors, manage labels, save calibration samples, and provision device settings from this page.</p>
     </section>
 
     <section class="layout">
@@ -306,7 +306,7 @@
         </details>
 
         <details class="panel">
-          <summary>Firmware Flash</summary>
+          <summary>Firmware & Provisioning</summary>
           <div class="panel-body">
           <div class="form">
             <div class="grid-2">
@@ -331,13 +331,21 @@
                 <input id="serverHost">
               </div>
               <div class="field">
+                <label for="serverPort">Server port</label>
+                <input id="serverPort" type="number" min="1" max="65535" value="8080">
+              </div>
+              <div class="field">
+                <label for="postIntervalMs">Post interval (ms)</label>
+                <input id="postIntervalMs" type="number" min="100" step="50" value="300">
+              </div>
+              <div class="field">
                 <label for="fqbn">Board FQBN</label>
                 <input id="fqbn" value="esp32:esp32:esp32s3">
               </div>
             </div>
             <div class="actions">
               <button class="button secondary" type="button" id="refreshPortsButton">Refresh ports</button>
-              <button class="button" type="button" id="flashButton">Flash selected port</button>
+              <button class="button" type="button" id="flashButton">Flash & provision</button>
               <span id="flashStatus" class="status"></span>
             </div>
             <pre id="flashOutput" hidden></pre>
@@ -514,8 +522,7 @@
           <p class="meta">Position: (${sensor.x_cm}, ${sensor.y_cm}) cm</p>
           <p class="meta">Remote IP: ${sensor.last_remote_ip || "-"}</p>
           <p class="meta">Presence: ${sensor.present ? "yes" : "no"}</p>
-          <p class="meta">Moving: ${sensor.moving_distance_cm} cm / energy ${sensor.moving_energy}</p>
-          <p class="meta">Stationary: ${sensor.stationary_distance_cm} cm / energy ${sensor.stationary_energy}</p>
+          <p class="meta">Distance: ${sensor.distance_cm || 0} cm</p>
         `;
         sensorList.appendChild(card);
       }
@@ -598,6 +605,7 @@
     function collectConfigPayload() {
       const sensors = [...sensorConfigList.querySelectorAll(".sensor-config-row")].map((row) => ({
         id: row.dataset.sensorId,
+        name: row.dataset.sensorId,
         label: row.querySelector('[data-field="label"]').value,
         x_cm: Number(row.querySelector('[data-field="x_cm"]').value),
         y_cm: Number(row.querySelector('[data-field="y_cm"]').value),
@@ -668,6 +676,8 @@
         wifi_ssid: document.getElementById("wifiSsid").value,
         wifi_password: document.getElementById("wifiPassword").value,
         server_host: document.getElementById("serverHost").value,
+        server_port: Number(document.getElementById("serverPort").value),
+        post_interval_ms: Number(document.getElementById("postIntervalMs").value),
         fqbn: document.getElementById("fqbn").value,
       };
 

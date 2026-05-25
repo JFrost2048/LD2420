@@ -1,63 +1,59 @@
 # ESP32 + LD2420 Position Monitor
 
-`ESP32 + LD2420` 4세트에서 읽은 거리 데이터를 서버로 모아 웹에서 사람 위치를 추정하는 예제입니다.
+ESP32 nodes read simple LD2420 text output and post distance readings to the local Python server.
 
-## 구성
+## Files
 
-- `esp32/ld2420_node/ld2420_node.ino`
-- `server/server.py`
-- `server/config.example.json`
-- `server/public/index.html`
+- `esp32/ld2420_node/ld2420_node.ino`: ESP32 firmware
+- `server/server.py`: local HTTP server, tracker, and firmware/provisioning API
+- `server/config.example.json`: example room/sensor config
+- `server/public/index.html`: browser dashboard
 
-## ESP32 설정
+## Wiring
 
-업로드 전 아래 값만 각 보드에 맞게 수정합니다.
+For the LD2420 variant used here:
 
-```cpp
-const char* WIFI_SSID = "YOUR_WIFI_NAME";
-const char* WIFI_PASSWORD = "YOUR_WIFI_PASSWORD";
-const char* SERVER_HOST = "YOUR_SERVER_IP";
-const uint16_t SERVER_PORT = 8080;
-const char* SENSOR_ID = "sensor-a";
+- `LD2420 3V3 -> ESP32 3V3`
+- `LD2420 GND -> ESP32 GND`
+- `LD2420 OT1` or `OT2 -> ESP32 GPIO16`
+- `LD2420 RX` is not used
+
+Start with `OT1`. If no radar lines arrive, move only that wire to `OT2`.
+
+## Device Payload
+
+The firmware posts only the values the server needs:
+
+```json
+{
+  "sensor_id": "sensor-a",
+  "present": true,
+  "distance_cm": 120
+}
 ```
 
-센서 ID 예시:
+By default it posts every `300 ms`. If the radar is silent for `2000 ms`, the node reports no presence and distance `0`.
 
-- `sensor-a`
-- `sensor-b`
-- `sensor-c`
-- `sensor-d`
+## Provisioning
 
-## 배선
+Wi-Fi, server address, sensor id, server port, and post interval are stored on the ESP32 with `Preferences`.
 
-지금 프로젝트에서 사용한 LD2420 5핀 모듈 기준:
+Use the dashboard's `Firmware & Provisioning` panel to flash and provision a device. Changing those settings later should only require provisioning again, not editing and rebuilding the firmware source.
 
-- `3V3 -> ESP32 3V3`
-- `GND -> ESP32 GND`
-- `OT1` 또는 `OT2 -> ESP32 GPIO16`
-- `RX`는 기본 예제에서 미사용
+## Server
 
-모듈에 따라 `OT1` 대신 `OT2`가 실제 출력 핀일 수 있습니다.
-
-## 서버 실행
-
-설정 예시 파일 복사:
+Copy the example config once:
 
 ```powershell
 Copy-Item .\server\config.example.json .\server\config.json
 ```
 
-실행:
+Run:
 
 ```powershell
 python .\server\server.py
 ```
 
-브라우저:
+Open:
 
 - `http://127.0.0.1:8080`
-
-## 참고
-
-- `server/config.json`은 개인 환경 설정 파일이라 기본적으로 git에 포함하지 않습니다.
-- 방 크기와 센서 좌표는 웹 UI에서 수정하거나 `server/config.json`에서 직접 바꿀 수 있습니다.
