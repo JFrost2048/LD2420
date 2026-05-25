@@ -229,6 +229,10 @@ def command_output(*parts: object) -> str:
 
 
 def provision_firmware(port: str, payload: dict) -> str:
+    port = str(port or "").strip()
+    if not port:
+        raise ValueError("Missing COM port for provisioning")
+
     lines = [
         "PROVISION_BEGIN",
         f"sensor_id={str(payload.get('sensor_id', '')).strip()}",
@@ -245,44 +249,66 @@ def provision_firmware(port: str, payload: dict) -> str:
         handle.write("\n".join(lines))
         handle.write("\n")
 
-    script = r"""
-$portName = $args[0]
-$linesPath = $args[1]
+    with tempfile.NamedTemporaryFile("w", encoding="utf-8", suffix=".ps1", delete=False, newline="\n") as handle:
+        script_path = Path(handle.name)
+        handle.write(r"""
+param(
+  [Parameter(Mandatory=$true)]
+  [ValidateNotNullOrEmpty()]
+  [string]$portName,
+  [Parameter(Mandatory=$true)]
+  [ValidateNotNullOrEmpty()]
+  [string]$linesPath
+)
+$ErrorActionPreference = "Stop"
 $serial = New-Object System.IO.Ports.SerialPort $portName, 115200, ([System.IO.Ports.Parity]::None), 8, ([System.IO.Ports.StopBits]::One)
 $serial.NewLine = "`n"
+$serial.ReadTimeout = 1000
+$serial.WriteTimeout = 2000
 $serial.DtrEnable = $true
-$serial.RtsEnable = $true
-for ($attempt = 0; $attempt -lt 10; $attempt++) {
+$serial.RtsEnable = $false
+Write-Output "Waiting for $portName..."
+for ($attempt = 0; $attempt -lt 30; $attempt++) {
   try {
     $serial.Open()
     break
   } catch {
-    Start-Sleep -Milliseconds 1000
+    Start-Sleep -Milliseconds 1500
   }
 }
 if (-not $serial.IsOpen) {
   throw "Could not open serial port $portName for provisioning"
 }
-Start-Sleep -Milliseconds 2500
-Get-Content -LiteralPath $linesPath | ForEach-Object {
-  $serial.WriteLine($_)
-  Start-Sleep -Milliseconds 80
+try {
+  Write-Output "Opened $portName. Sending provision data..."
+  $serial.DiscardInBuffer()
+  $serial.DiscardOutBuffer()
+  Start-Sleep -Milliseconds 3500
+  Get-Content -LiteralPath $linesPath | ForEach-Object {
+    $serial.WriteLine($_)
+    Start-Sleep -Milliseconds 120
+  }
+  Start-Sleep -Milliseconds 1000
+  Write-Output "Provision data sent."
+} finally {
+  if ($serial.IsOpen) {
+    $serial.Close()
+  }
 }
-Start-Sleep -Milliseconds 500
-$serial.Close()
-"""
+""")
     try:
         result = subprocess.run(
-            ["powershell", "-NoProfile", "-Command", script, port, str(provision_path)],
+            ["powershell", "-NoProfile", "-ExecutionPolicy", "Bypass", "-File", str(script_path), port, str(provision_path)],
             capture_output=True,
             text=True,
-            timeout=25,
+            timeout=90,
         )
         if result.returncode != 0:
             raise RuntimeError(command_output(result.stdout, result.stderr).strip())
         return command_output(result.stdout, result.stderr)
     finally:
         provision_path.unlink(missing_ok=True)
+        script_path.unlink(missing_ok=True)
 
 
 def run_firmware_job(job_id: str, payload: dict) -> None:
@@ -334,6 +360,7 @@ def run_firmware_job(job_id: str, payload: dict) -> None:
             )
             return
 
+        time.sleep(4)
         update_firmware_job(job_id, status="provisioning")
         provision_output = provision_firmware(port, payload)
 

@@ -670,8 +670,14 @@
     }
 
     async function startFlash() {
+      const selectedPort = portSelect.value.trim();
+      if (!selectedPort) {
+        flashStatus.textContent = "Select a COM port first. Click Refresh ports if the list is empty.";
+        return;
+      }
+
       const payload = {
-        port: portSelect.value,
+        port: selectedPort,
         sensor_id: document.getElementById("flashSensorId").value.trim(),
         wifi_ssid: document.getElementById("wifiSsid").value,
         wifi_password: document.getElementById("wifiPassword").value,
