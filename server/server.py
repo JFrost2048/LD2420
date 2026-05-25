@@ -28,6 +28,7 @@ ARDUINO_CLI_CANDIDATES = [
 ]
 FIRMWARE_JOBS = {}
 FIRMWARE_JOBS_LOCK = threading.Lock()
+PREFERRED_SERVER_HOST = "192.168.1.106"
 
 
 def sensor_name_from_config(item: dict) -> str:
@@ -162,6 +163,9 @@ def calibration_distance_map(sample: dict) -> Dict[str, float]:
 
 
 def get_lan_ip() -> str:
+    if PREFERRED_SERVER_HOST:
+        return PREFERRED_SERVER_HOST
+
     try:
         with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as sock:
             sock.connect(("8.8.8.8", 80))
