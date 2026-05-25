@@ -9,10 +9,5 @@
     "host": "0.0.0.0",
     "port": 8080
   },
-  "sensors": [
-    { "id": "sensor-a", "x_cm": 30, "y_cm": 30 },
-    { "id": "sensor-b", "x_cm": 470, "y_cm": 30 },
-    { "id": "sensor-c", "x_cm": 470, "y_cm": 370 },
-    { "id": "sensor-d", "x_cm": 30, "y_cm": 370 }
-  ]
+  "sensors": []
 }

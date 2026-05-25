@@ -1,7 +1,12 @@
 import json
 import math
+import re
+import shutil
+import socket
+import subprocess
 import threading
 import time
+import uuid
 from dataclasses import dataclass
 from http import HTTPStatus
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
@@ -13,6 +18,16 @@ from urllib.parse import urlparse
 BASE_DIR = Path(__file__).resolve().parent
 PUBLIC_DIR = BASE_DIR / "public"
 CONFIG_PATH = BASE_DIR / "config.json"
+CALIBRATION_PATH = BASE_DIR / "calibration_samples.jsonl"
+PROJECT_DIR = BASE_DIR.parent
+FIRMWARE_SOURCE_PATH = PROJECT_DIR / "esp32" / "ld2420_node" / "ld2420_node.ino"
+FLASH_WORK_DIR = BASE_DIR / ".flash_work"
+ARDUINO_CLI_CANDIDATES = [
+    Path("C:/Program Files/Arduino CLI/arduino-cli.exe"),
+    Path.home() / "AppData/Local/Programs/Arduino IDE/resources/app/lib/backend/resources/arduino-cli.exe",
+]
+FIRMWARE_JOBS = {}
+FIRMWARE_JOBS_LOCK = threading.Lock()
 
 
 def load_config() -> dict:
@@ -35,6 +50,199 @@ def save_config(config: dict) -> None:
         handle.write("\n")
 
 
+def append_calibration_sample(sample: dict) -> None:
+    with CALIBRATION_PATH.open("a", encoding="utf-8") as handle:
+        handle.write(json.dumps(sample, ensure_ascii=False, sort_keys=True))
+        handle.write("\n")
+
+
+def load_calibration_samples() -> List[dict]:
+    if not CALIBRATION_PATH.exists():
+        return []
+
+    samples = []
+    with CALIBRATION_PATH.open("r", encoding="utf-8") as handle:
+        for line in handle:
+            line = line.strip()
+            if not line:
+                continue
+            try:
+                samples.append(json.loads(line))
+            except json.JSONDecodeError:
+                continue
+    return samples
+
+
+def calibration_distance_map(sample: dict) -> Dict[str, float]:
+    distances = {}
+    for sensor in sample.get("state", {}).get("sensors", []):
+        distance = sensor.get("selected_distance_cm")
+        if distance is None:
+            distance = max(sensor.get("moving_distance_cm") or 0, sensor.get("stationary_distance_cm") or 0)
+        if distance:
+            distances[str(sensor.get("id"))] = float(distance)
+    return distances
+
+
+def get_lan_ip() -> str:
+    try:
+        with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as sock:
+            sock.connect(("8.8.8.8", 80))
+            return sock.getsockname()[0]
+    except OSError:
+        return "127.0.0.1"
+
+
+def find_arduino_cli() -> Optional[Path]:
+    for candidate in ARDUINO_CLI_CANDIDATES:
+        if candidate.exists():
+            return candidate
+
+    resolved = shutil.which("arduino-cli")
+    return Path(resolved) if resolved else None
+
+
+def list_serial_ports() -> List[dict]:
+    command = [
+        "powershell",
+        "-NoProfile",
+        "-Command",
+        (
+            "Get-CimInstance Win32_SerialPort | "
+            "Select-Object DeviceID,Name,Description,PNPDeviceID | "
+            "ConvertTo-Json -Depth 3"
+        ),
+    ]
+
+    try:
+        result = subprocess.run(command, capture_output=True, text=True, timeout=8)
+    except (OSError, subprocess.SubprocessError):
+        return []
+
+    if result.returncode != 0 or not result.stdout.strip():
+        return []
+
+    try:
+        parsed = json.loads(result.stdout)
+    except json.JSONDecodeError:
+        return []
+
+    if isinstance(parsed, dict):
+        parsed = [parsed]
+
+    ports = []
+    for item in parsed:
+        ports.append(
+            {
+                "port": item.get("DeviceID"),
+                "name": item.get("Name"),
+                "description": item.get("Description"),
+                "pnp_device_id": item.get("PNPDeviceID"),
+            }
+        )
+    return ports
+
+
+def replace_cpp_string(source: str, name: str, value: str) -> str:
+    escaped = value.replace("\\", "\\\\").replace('"', '\\"')
+    pattern = rf'const\s+char\*\s+{re.escape(name)}\s*=\s*"[^"]*";'
+    replacement = f'const char* {name} = "{escaped}";'
+    return re.sub(pattern, replacement, source)
+
+
+def command_output(*parts: object) -> str:
+    return "".join(str(part or "") for part in parts)
+
+
+def prepare_firmware(sensor_id: str, wifi_ssid: str, wifi_password: str, server_host: str) -> Path:
+    source = FIRMWARE_SOURCE_PATH.read_text(encoding="utf-8")
+    source = replace_cpp_string(source, "WIFI_SSID", wifi_ssid)
+    source = replace_cpp_string(source, "WIFI_PASSWORD", wifi_password)
+    source = replace_cpp_string(source, "SERVER_HOST", server_host)
+    source = replace_cpp_string(source, "SENSOR_ID", sensor_id)
+
+    sketch_dir = FLASH_WORK_DIR / f"ld2420_node_{uuid.uuid4().hex[:8]}"
+    sketch_dir.mkdir(parents=True, exist_ok=False)
+    sketch_path = sketch_dir / f"{sketch_dir.name}.ino"
+    sketch_path.write_text(source, encoding="utf-8")
+    return sketch_dir
+
+
+def run_firmware_job(job_id: str, payload: dict) -> None:
+    cli = find_arduino_cli()
+    if cli is None:
+        update_firmware_job(job_id, status="failed", error="arduino-cli not found")
+        return
+
+    port = str(payload.get("port", "")).strip()
+    sensor_id = str(payload.get("sensor_id", "")).strip()
+    wifi_ssid = str(payload.get("wifi_ssid", "")).strip()
+    wifi_password = str(payload.get("wifi_password", ""))
+    server_host = str(payload.get("server_host", "")).strip() or get_lan_ip()
+    fqbn = str(payload.get("fqbn", "esp32:esp32:esp32s3")).strip()
+
+    if not port:
+        update_firmware_job(job_id, status="failed", error="Missing COM port")
+        return
+    if not sensor_id:
+        update_firmware_job(job_id, status="failed", error="Missing sensor id")
+        return
+    if not wifi_ssid:
+        update_firmware_job(job_id, status="failed", error="Missing Wi-Fi SSID")
+        return
+
+    sketch_dir = None
+    try:
+        sketch_dir = prepare_firmware(sensor_id, wifi_ssid, wifi_password, server_host)
+        update_firmware_job(job_id, status="compiling")
+
+        compile_cmd = [str(cli), "compile", "--fqbn", fqbn, str(sketch_dir)]
+        compile_result = subprocess.run(compile_cmd, capture_output=True, text=True, timeout=300)
+        if compile_result.returncode != 0:
+            update_firmware_job(
+                job_id,
+                status="failed",
+                error="Compile failed",
+                output=command_output(compile_result.stdout, compile_result.stderr)[-8000:],
+            )
+            return
+
+        update_firmware_job(job_id, status="uploading")
+        upload_cmd = [str(cli), "upload", "-p", port, "--fqbn", fqbn, str(sketch_dir)]
+        upload_result = subprocess.run(upload_cmd, capture_output=True, text=True, timeout=180)
+        if upload_result.returncode != 0:
+            update_firmware_job(
+                job_id,
+                status="failed",
+                error="Upload failed",
+                output=command_output(upload_result.stdout, upload_result.stderr)[-8000:],
+            )
+            return
+
+        update_firmware_job(
+            job_id,
+            status="done",
+            output=command_output(
+                compile_result.stdout,
+                compile_result.stderr,
+                upload_result.stdout,
+                upload_result.stderr,
+            )[-8000:],
+        )
+    except Exception as exc:
+        update_firmware_job(job_id, status="failed", error=str(exc))
+    finally:
+        if sketch_dir is not None:
+            shutil.rmtree(sketch_dir, ignore_errors=True)
+
+
+def update_firmware_job(job_id: str, **updates: object) -> None:
+    with FIRMWARE_JOBS_LOCK:
+        job = FIRMWARE_JOBS.setdefault(job_id, {})
+        job.update(updates)
+        job["updated_at_ms"] = int(time.time() * 1000)
+
+
 @dataclass
 class SensorState:
     sensor_id: str
@@ -49,9 +257,11 @@ class SensorState:
     stationary_energy: int = 0
     selected_distance_cm: Optional[float] = None
     selected_weight: float = 0.0
+    last_remote_ip: Optional[str] = None
 
     def update_from_payload(self, payload: dict) -> None:
         self.last_update_ms = int(time.time() * 1000)
+        self.last_remote_ip = payload.get("_remote_ip")
         self.device_timestamp_ms = int(payload.get("timestamp_ms", 0) or 0)
         self.present = bool(payload.get("present", False))
         self.moving = bool(payload.get("moving", False))
@@ -161,17 +371,51 @@ class Tracker:
             self.apply_config(config)
             self.last_estimate = None
 
+    def default_sensor_position(self) -> dict:
+        width_cm = int(self.room.get("width_cm", 500))
+        height_cm = int(self.room.get("height_cm", 400))
+        margin = min(30, max(0, width_cm // 10), max(0, height_cm // 10))
+        corners = [
+            (margin, margin),
+            (width_cm - margin, margin),
+            (width_cm - margin, height_cm - margin),
+            (margin, height_cm - margin),
+        ]
+        x_cm, y_cm = corners[len(self.sensor_positions) % len(corners)]
+        return {"x_cm": int(x_cm), "y_cm": int(y_cm)}
+
+    def ensure_sensor(self, sensor_id: str) -> bool:
+        if sensor_id in self.sensor_states:
+            return False
+
+        position = self.default_sensor_position()
+        self.sensor_positions[sensor_id] = {
+            "id": sensor_id,
+            "label": sensor_id,
+            "x_cm": position["x_cm"],
+            "y_cm": position["y_cm"],
+        }
+        self.sensor_states[sensor_id] = SensorState(sensor_id=sensor_id)
+        self.last_estimate = None
+        return True
+
+    def export_sensor_config(self) -> List[dict]:
+        with self.lock:
+            return [dict(sensor) for sensor in self.sensor_positions.values()]
+
     def update_sensor(self, payload: dict) -> dict:
-        sensor_id = payload.get("sensor_id")
-        if sensor_id not in self.sensor_states:
-            raise ValueError(f"Unknown sensor_id: {sensor_id}")
+        sensor_id = str(payload.get("sensor_id", "")).strip()
+        if not sensor_id:
+            raise ValueError("Missing sensor_id")
 
         with self.lock:
+            created = self.ensure_sensor(sensor_id)
             self.sensor_states[sensor_id].update_from_payload(payload)
             estimate = self.recalculate_estimate()
             return {
                 "ok": True,
                 "sensor_id": sensor_id,
+                "created": created,
                 "estimate": estimate,
             }
 
@@ -248,6 +492,62 @@ class Tracker:
             "axis_measurement_count": len(measurements["x"]) + len(measurements["y"]),
         }
 
+    def estimate_from_calibration(
+        self,
+        active: List[dict],
+        width_cm: int,
+        height_cm: int,
+    ) -> Optional[dict]:
+        active_distances = {sensor["id"]: float(sensor["distance_cm"]) for sensor in active}
+        weighted_targets = []
+        closest_rms = None
+
+        for sample in load_calibration_samples():
+            target = sample.get("target", {})
+            target_x = target.get("x_cm")
+            target_y = target.get("y_cm")
+            if target_x is None or target_y is None:
+                continue
+
+            sample_distances = calibration_distance_map(sample)
+            common_ids = sorted(set(active_distances) & set(sample_distances))
+            if len(common_ids) < 2:
+                continue
+
+            squared_error = 0.0
+            for sensor_id in common_ids:
+                delta = active_distances[sensor_id] - sample_distances[sensor_id]
+                squared_error += delta * delta
+
+            rms = math.sqrt(squared_error / len(common_ids))
+            closest_rms = rms if closest_rms is None else min(closest_rms, rms)
+            weight = 1.0 / (max(rms, 8.0) ** 2)
+            weighted_targets.append(
+                (
+                    clamp(float(target_x), 0.0, width_cm),
+                    clamp(float(target_y), 0.0, height_cm),
+                    weight,
+                )
+            )
+
+        if not weighted_targets:
+            return None
+
+        total_weight = sum(weight for _, _, weight in weighted_targets)
+        if total_weight <= 0:
+            return None
+
+        x_cm = sum(x * weight for x, _, weight in weighted_targets) / total_weight
+        y_cm = sum(y * weight for _, y, weight in weighted_targets) / total_weight
+        confidence = 1.0 / (1.0 + (closest_rms or 0.0) / 120.0)
+
+        return {
+            "point": (clamp(x_cm, 0.0, width_cm), clamp(y_cm, 0.0, height_cm)),
+            "confidence": confidence,
+            "calibration_sample_count": len(weighted_targets),
+            "calibration_closest_error_cm": round(closest_rms or 0.0, 2),
+        }
+
     def recalculate_estimate(self) -> Optional[dict]:
         active = []
         now_ms = int(time.time() * 1000)
@@ -307,6 +607,17 @@ class Tracker:
         if confidence is None:
             confidence = 1.0 / (1.0 + (best_error / max(len(active), 1)))
 
+        calibration_estimate = self.estimate_from_calibration(active, width_cm, height_cm)
+        calibration_sample_count = 0
+        calibration_closest_error_cm = None
+        uncalibrated_point = best_point
+        if calibration_estimate is not None:
+            best_point = calibration_estimate["point"]
+            confidence = max(confidence, calibration_estimate["confidence"])
+            calibration_sample_count = calibration_estimate["calibration_sample_count"]
+            calibration_closest_error_cm = calibration_estimate["calibration_closest_error_cm"]
+            method = f"{method}+calibration"
+
         smoothing = float(self.room.get("smoothing", 0.35))
         if self.last_estimate is None:
             smoothed_x, smoothed_y = best_point
@@ -323,9 +634,13 @@ class Tracker:
             "y_cm": round(smoothed_y, 1),
             "raw_x_cm": round(best_point[0], 1),
             "raw_y_cm": round(best_point[1], 1),
+            "uncalibrated_x_cm": round(uncalibrated_point[0], 1),
+            "uncalibrated_y_cm": round(uncalibrated_point[1], 1),
             "confidence": round(confidence, 4),
             "active_sensor_count": len(active),
             "axis_measurement_count": axis_measurement_count,
+            "calibration_sample_count": calibration_sample_count,
+            "calibration_closest_error_cm": calibration_closest_error_cm,
             "method": method,
             "best_error": round(best_error, 2),
             "updated_at_ms": int(time.time() * 1000),
@@ -408,6 +723,7 @@ class Tracker:
                 sensors.append(
                     {
                         "id": sensor_id,
+                        "label": cfg.get("label", sensor_id),
                         "x_cm": cfg["x_cm"],
                         "y_cm": cfg["y_cm"],
                         "present": state.present,
@@ -419,6 +735,7 @@ class Tracker:
                         "stationary_energy": state.stationary_energy,
                         "selected_distance_cm": state.selected_distance_cm,
                         "selected_weight": state.selected_weight,
+                        "last_remote_ip": state.last_remote_ip,
                         "last_update_ms": state.last_update_ms,
                         "device_timestamp_ms": state.device_timestamp_ms,
                         "age_ms": now_ms - state.last_update_ms if state.last_update_ms else None,
@@ -429,6 +746,9 @@ class Tracker:
                 "room": self.room,
                 "estimate": estimate,
                 "sensors": sensors,
+                "calibration": {
+                    "sample_count": len(load_calibration_samples()),
+                },
             }
 
 
@@ -449,6 +769,26 @@ class RequestHandler(BaseHTTPRequestHandler):
             self.send_json(TRACKER.build_state())
             return
 
+        if parsed.path == "/api/ports":
+            self.send_json(
+                {
+                    "ports": list_serial_ports(),
+                    "server_host": get_lan_ip(),
+                    "arduino_cli": str(find_arduino_cli() or ""),
+                }
+            )
+            return
+
+        if parsed.path.startswith("/api/firmware/"):
+            job_id = parsed.path.replace("/api/firmware/", "", 1)
+            with FIRMWARE_JOBS_LOCK:
+                job = dict(FIRMWARE_JOBS.get(job_id, {}))
+            if not job:
+                self.send_json({"ok": False, "error": "Unknown job"}, status=HTTPStatus.NOT_FOUND)
+                return
+            self.send_json({"ok": True, "job": job})
+            return
+
         if parsed.path == "/":
             self.serve_static("index.html")
             return
@@ -466,6 +806,18 @@ class RequestHandler(BaseHTTPRequestHandler):
             self.handle_config_update()
             return
 
+        if parsed.path == "/api/calibration":
+            self.handle_calibration_capture()
+            return
+
+        if parsed.path == "/api/auto-label":
+            self.handle_auto_label()
+            return
+
+        if parsed.path == "/api/firmware":
+            self.handle_firmware_upload()
+            return
+
         if parsed.path != "/api/sensor":
             self.send_error(HTTPStatus.NOT_FOUND, "Not found")
             return
@@ -475,7 +827,11 @@ class RequestHandler(BaseHTTPRequestHandler):
 
         try:
             payload = json.loads(raw.decode("utf-8"))
+            payload["_remote_ip"] = self.client_address[0]
             result = TRACKER.update_sensor(payload)
+            if result.get("created"):
+                CONFIG["sensors"] = TRACKER.export_sensor_config()
+                save_config(CONFIG)
             self.send_json(result, status=HTTPStatus.CREATED)
         except ValueError as exc:
             self.send_json({"ok": False, "error": str(exc)}, status=HTTPStatus.BAD_REQUEST)
@@ -484,6 +840,85 @@ class RequestHandler(BaseHTTPRequestHandler):
                 {"ok": False, "error": "Invalid JSON payload"},
                 status=HTTPStatus.BAD_REQUEST,
             )
+
+    def handle_calibration_capture(self) -> None:
+        content_length = int(self.headers.get("Content-Length", "0"))
+        raw = self.rfile.read(content_length)
+
+        try:
+            payload = json.loads(raw.decode("utf-8") or "{}")
+            label = str(payload.get("label", "")).strip()
+            target = payload.get("target", {})
+            if not label:
+                raise ValueError("Missing calibration label")
+
+            sample = {
+                "created_at_ms": int(time.time() * 1000),
+                "label": label,
+                "target": {
+                    "x_cm": target.get("x_cm"),
+                    "y_cm": target.get("y_cm"),
+                },
+                "state": TRACKER.build_state(),
+            }
+            append_calibration_sample(sample)
+            self.send_json({"ok": True, "sample": sample})
+        except (TypeError, ValueError) as exc:
+            self.send_json({"ok": False, "error": str(exc)}, status=HTTPStatus.BAD_REQUEST)
+        except json.JSONDecodeError:
+            self.send_json({"ok": False, "error": "Invalid JSON payload"}, status=HTTPStatus.BAD_REQUEST)
+
+    def handle_auto_label(self) -> None:
+        global CONFIG
+
+        with TRACKER.lock:
+            width_cm = int(TRACKER.room.get("width_cm", 500))
+            height_cm = int(TRACKER.room.get("height_cm", 400))
+            positions = [
+                ("top-left", 30, 30),
+                ("top-right", width_cm - 30, 30),
+                ("bottom-right", width_cm - 30, height_cm - 30),
+                ("bottom-left", 30, height_cm - 30),
+                ("center", width_cm // 2, height_cm // 2),
+            ]
+            sensors = []
+            for index, sensor_id in enumerate(TRACKER.sensor_positions.keys()):
+                label, x_cm, y_cm = positions[index % len(positions)]
+                sensors.append({"id": sensor_id, "label": label, "x_cm": x_cm, "y_cm": y_cm})
+
+        CONFIG = {
+            "room": CONFIG["room"],
+            "server": CONFIG["server"],
+            "sensors": sensors,
+        }
+        save_config(CONFIG)
+        TRACKER.update_config(CONFIG)
+        self.send_json({"ok": True, "config": CONFIG})
+
+    def handle_firmware_upload(self) -> None:
+        content_length = int(self.headers.get("Content-Length", "0"))
+        raw = self.rfile.read(content_length)
+
+        try:
+            payload = json.loads(raw.decode("utf-8") or "{}")
+        except json.JSONDecodeError:
+            self.send_json({"ok": False, "error": "Invalid JSON payload"}, status=HTTPStatus.BAD_REQUEST)
+            return
+
+        job_id = uuid.uuid4().hex
+        with FIRMWARE_JOBS_LOCK:
+            FIRMWARE_JOBS[job_id] = {
+                "id": job_id,
+                "status": "queued",
+                "created_at_ms": int(time.time() * 1000),
+                "updated_at_ms": int(time.time() * 1000),
+                "port": payload.get("port"),
+                "sensor_id": payload.get("sensor_id"),
+            }
+
+        thread = threading.Thread(target=run_firmware_job, args=(job_id, payload), daemon=True)
+        thread.start()
+        self.send_json({"ok": True, "job_id": job_id, "job": FIRMWARE_JOBS[job_id]}, status=HTTPStatus.ACCEPTED)
 
     def handle_config_update(self) -> None:
         global CONFIG
@@ -504,22 +939,19 @@ class RequestHandler(BaseHTTPRequestHandler):
             }
 
             normalized_sensors = []
-            known_ids = set(TRACKER.sensor_states.keys())
             for item in sensors:
                 sensor_id = str(item["id"])
-                if sensor_id not in known_ids:
-                    raise ValueError(f"Unknown sensor_id: {sensor_id}")
+                if not sensor_id:
+                    raise ValueError("Sensor id cannot be empty")
 
                 normalized_sensors.append(
                     {
                         "id": sensor_id,
+                        "label": str(item.get("label", sensor_id)).strip() or sensor_id,
                         "x_cm": int(item["x_cm"]),
                         "y_cm": int(item["y_cm"]),
                     }
                 )
-
-            if len(normalized_sensors) != len(known_ids):
-                raise ValueError("Every sensor must be included in the config update")
 
             CONFIG = {
                 "room": normalized_room,
@@ -572,11 +1004,15 @@ class RequestHandler(BaseHTTPRequestHandler):
         return
 
 
+class ReusableThreadingHTTPServer(ThreadingHTTPServer):
+    allow_reuse_address = True
+    daemon_threads = True
+
+
 def main() -> None:
     host = CONFIG["server"].get("host", "0.0.0.0")
     port = int(CONFIG["server"].get("port", 8080))
-    ThreadingHTTPServer.daemon_threads = True
-    httpd = ThreadingHTTPServer((host, port), RequestHandler)
+    httpd = ReusableThreadingHTTPServer((host, port), RequestHandler)
     print(f"Server started on http://{host}:{port}")
     print("Open a browser and check the dashboard.")
     httpd.serve_forever()

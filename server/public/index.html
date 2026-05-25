@@ -1,108 +1,123 @@
 <!DOCTYPE html>
-<html lang="ko">
+<html lang="en">
 <head>
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
   <title>LD2420 Position Monitor</title>
   <style>
     :root {
-      --bg: #eef3e8;
+      --bg: #f3f5ef;
       --panel: #fffdf7;
       --ink: #172019;
+      --muted: #5b665d;
       --accent: #0f766e;
-      --accent-soft: #b7e6db;
+      --accent-soft: #cdeee6;
       --danger: #c2410c;
-      --grid: #d7dfd1;
-      --sensor: #334155;
+      --line: rgba(23, 32, 25, 0.1);
       --person: #d9480f;
     }
 
-    * {
-      box-sizing: border-box;
-    }
+    * { box-sizing: border-box; }
 
     body {
       margin: 0;
       font-family: "Segoe UI", "Noto Sans KR", sans-serif;
-      background:
-        radial-gradient(circle at top left, #f8f4d6 0, transparent 25%),
-        linear-gradient(135deg, #edf4ea 0%, #dfe9df 100%);
+      background: var(--bg);
       color: var(--ink);
     }
 
     .page {
-      max-width: 1280px;
+      max-width: 1320px;
       margin: 0 auto;
-      padding: 24px;
+      padding: 20px;
       display: grid;
-      gap: 20px;
+      gap: 16px;
     }
 
-    .hero,
-    .panel {
-      background: rgba(255, 253, 247, 0.92);
-      backdrop-filter: blur(10px);
-      border: 1px solid rgba(23, 32, 25, 0.08);
-      border-radius: 22px;
-      box-shadow: 0 18px 50px rgba(23, 32, 25, 0.08);
+    .hero, .panel {
+      background: var(--panel);
+      border: 1px solid var(--line);
+      border-radius: 8px;
+      box-shadow: 0 10px 24px rgba(23, 32, 25, 0.06);
     }
 
-    .hero {
-      padding: 20px 24px;
-    }
-
-    h1, h2, h3 {
-      margin: 0;
-    }
+    .hero { padding: 16px 18px; }
+    h1, h2, h3 { margin: 0; }
+    h1 { font-size: 27px; }
+    h2 { font-size: 18px; margin-bottom: 12px; }
+    h3 { font-size: 15px; margin-bottom: 8px; }
 
     .subtitle {
-      margin: 8px 0 0;
-      color: #48574a;
+      margin: 6px 0 0;
+      color: var(--muted);
     }
 
     .layout {
       display: grid;
-      grid-template-columns: minmax(360px, 1.5fr) minmax(320px, 1fr);
-      gap: 20px;
+      grid-template-columns: minmax(420px, 1.45fr) minmax(360px, 1fr);
+      gap: 16px;
     }
 
-    .panel {
-      padding: 18px;
+    .panel { padding: 16px; }
+    details.panel { padding: 0; }
+    details.panel > summary {
+      cursor: pointer;
+      list-style: none;
+      padding: 14px 16px;
+      font-size: 18px;
+      font-weight: 700;
+      border-bottom: 1px solid transparent;
     }
-
-    .stack {
+    details.panel > summary::-webkit-details-marker { display: none; }
+    details.panel > summary::after {
+      content: "+";
+      float: right;
+      color: var(--muted);
+    }
+    details.panel[open] > summary {
+      border-bottom-color: var(--line);
+    }
+    details.panel[open] > summary::after { content: "-"; }
+    .panel-body {
+      padding: 16px;
       display: grid;
-      gap: 20px;
+      gap: 10px;
     }
+    .stack { display: grid; gap: 16px; align-content: start; }
 
     canvas {
       width: 100%;
       height: auto;
       display: block;
-      background:
-        linear-gradient(0deg, rgba(183, 230, 219, 0.22), rgba(183, 230, 219, 0.22)),
-        #fff;
-      border-radius: 16px;
-      border: 1px solid rgba(23, 32, 25, 0.08);
+      background: #fff;
+      border-radius: 8px;
+      border: 1px solid var(--line);
+    }
+
+    .stats, .grid-2, .grid-3 {
+      display: grid;
+      gap: 10px;
     }
 
     .stats {
-      display: grid;
       grid-template-columns: repeat(2, minmax(0, 1fr));
-      gap: 12px;
-      margin-bottom: 16px;
+      margin-bottom: 14px;
     }
 
-    .stat {
+    .grid-2 { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+    .grid-3 { grid-template-columns: 1fr 1fr 1fr; }
+
+    .stat, .card {
+      background: #f7f8f4;
+      border: 1px solid rgba(23, 32, 25, 0.06);
+      border-radius: 8px;
       padding: 12px;
-      background: #f5f7ef;
-      border-radius: 14px;
     }
 
     .label {
       display: block;
       font-size: 12px;
-      color: #5a6a5d;
+      color: var(--muted);
       margin-bottom: 6px;
     }
 
@@ -111,22 +126,16 @@
       font-weight: 700;
     }
 
-    .sensor-list {
+    .list, .form, .calibration-grid {
       display: grid;
       gap: 10px;
     }
 
-    .sensor-card {
-      background: #f7f8f4;
-      border-radius: 14px;
-      padding: 12px;
-      border: 1px solid rgba(23, 32, 25, 0.06);
-    }
-
-    .sensor-head {
+    .head {
       display: flex;
-      justify-content: space-between;
       align-items: center;
+      justify-content: space-between;
+      gap: 10px;
       margin-bottom: 8px;
       font-weight: 700;
     }
@@ -136,17 +145,11 @@
       border-radius: 999px;
       font-size: 12px;
       background: #e8ece6;
+      white-space: nowrap;
     }
 
-    .badge.live {
-      background: var(--accent-soft);
-      color: #0b534e;
-    }
-
-    .badge.offline {
-      background: #f8d7cc;
-      color: var(--danger);
-    }
+    .badge.live { background: var(--accent-soft); color: #0b534e; }
+    .badge.offline { background: #f8d7cc; color: var(--danger); }
 
     .meta {
       margin: 4px 0;
@@ -154,19 +157,11 @@
       color: #465247;
     }
 
-    .config-form {
-      display: grid;
-      gap: 12px;
-    }
-
-    .config-grid {
-      display: grid;
-      grid-template-columns: repeat(2, minmax(0, 1fr));
-      gap: 10px;
-    }
-
-    .config-grid.sensor-grid {
-      grid-template-columns: 1fr 1fr 1fr;
+    .empty, .status {
+      color: var(--muted);
+      font-size: 14px;
+      margin: 0;
+      min-height: 20px;
     }
 
     .field {
@@ -176,35 +171,34 @@
 
     .field label {
       font-size: 13px;
-      color: #5a6a5d;
+      color: var(--muted);
     }
 
-    .field input {
+    input, select {
       width: 100%;
-      padding: 10px 12px;
-      border: 1px solid rgba(23, 32, 25, 0.12);
-      border-radius: 12px;
+      min-width: 0;
+      padding: 9px 10px;
+      border: 1px solid rgba(23, 32, 25, 0.14);
+      border-radius: 8px;
       background: #fcfcf8;
       color: var(--ink);
       font: inherit;
     }
 
-    .field input:disabled {
-      background: #eef2ea;
-      color: #5b665d;
-    }
+    input:disabled { background: #eef2ea; color: #5b665d; }
 
-    .config-actions {
+    .actions {
       display: flex;
-      gap: 10px;
       align-items: center;
+      gap: 8px;
       flex-wrap: wrap;
     }
 
     .button {
-      padding: 10px 14px;
+      min-height: 38px;
+      padding: 9px 12px;
       border: 0;
-      border-radius: 12px;
+      border-radius: 8px;
       background: var(--accent);
       color: white;
       font: inherit;
@@ -212,26 +206,25 @@
       cursor: pointer;
     }
 
-    .button.secondary {
-      background: #dde7db;
-      color: #294133;
+    .button.secondary { background: #dde7db; color: #294133; }
+    .button.danger { background: var(--danger); }
+    .button:disabled { cursor: not-allowed; opacity: 0.55; }
+
+    pre {
+      margin: 8px 0 0;
+      max-height: 180px;
+      overflow: auto;
+      padding: 10px;
+      background: #172019;
+      color: #f8fff9;
+      border-radius: 8px;
+      font-size: 12px;
+      white-space: pre-wrap;
     }
 
-    .status {
-      font-size: 14px;
-      color: #465247;
-    }
-
-    @media (max-width: 920px) {
-      .layout {
-        grid-template-columns: 1fr;
-      }
-
-      .config-grid,
-      .config-grid.sensor-grid,
-      .stats {
-        grid-template-columns: 1fr;
-      }
+    @media (max-width: 960px) {
+      .page { padding: 12px; }
+      .layout, .stats, .grid-2, .grid-3 { grid-template-columns: 1fr; }
     }
   </style>
 </head>
@@ -239,61 +232,126 @@
   <main class="page">
     <section class="hero">
       <h1>LD2420 Position Monitor</h1>
-      <p class="subtitle">ESP32 4대의 레이더 값을 모아서 방 안 위치를 추정합니다.</p>
+      <p class="subtitle">Auto-discover ESP sensors, manage labels, save calibration samples, and flash firmware from this page.</p>
     </section>
 
     <section class="layout">
       <section class="panel">
         <div class="stats">
           <div class="stat">
-            <span class="label">추정 좌표</span>
-            <span class="value" id="positionValue">대기 중</span>
+            <span class="label">Estimated position</span>
+            <span class="value" id="positionValue">Waiting</span>
           </div>
           <div class="stat">
-            <span class="label">신뢰도</span>
+            <span class="label">Confidence</span>
             <span class="value" id="confidenceValue">-</span>
+          </div>
+          <div class="stat">
+            <span class="label">Calibration</span>
+            <span class="value" id="calibrationValue">0 samples</span>
+          </div>
+          <div class="stat">
+            <span class="label">Method</span>
+            <span class="value" id="methodValue">-</span>
           </div>
         </div>
         <canvas id="roomCanvas" width="800" height="640"></canvas>
       </section>
 
       <aside class="stack">
-        <section class="panel">
-          <h2>센서 상태</h2>
-          <div id="sensorList" class="sensor-list"></div>
-        </section>
+        <details class="panel" open>
+          <summary>Live Sensors</summary>
+          <div class="panel-body">
+          <div id="sensorList" class="list"></div>
+          </div>
+        </details>
 
-        <section class="panel">
-          <h2>배치 설정</h2>
-          <form id="configForm" class="config-form">
-            <div class="config-grid">
+        <details class="panel">
+          <summary>Sensor Setup</summary>
+          <div class="panel-body">
+          <form id="configForm" class="form">
+            <div class="grid-2">
               <div class="field">
-                <label for="roomWidth">방 너비 (cm)</label>
-                <input id="roomWidth" name="roomWidth" type="number" min="50" step="10">
+                <label for="roomWidth">Room width (cm)</label>
+                <input id="roomWidth" type="number" min="50" step="10">
               </div>
               <div class="field">
-                <label for="roomHeight">방 높이 (cm)</label>
-                <input id="roomHeight" name="roomHeight" type="number" min="50" step="10">
+                <label for="roomHeight">Room height (cm)</label>
+                <input id="roomHeight" type="number" min="50" step="10">
               </div>
               <div class="field">
-                <label for="gridStep">계산 간격 (cm)</label>
-                <input id="gridStep" name="gridStep" type="number" min="5" step="5">
+                <label for="gridStep">Grid step (cm)</label>
+                <input id="gridStep" type="number" min="5" step="5">
               </div>
               <div class="field">
-                <label for="smoothing">부드럽게 (0~1)</label>
-                <input id="smoothing" name="smoothing" type="number" min="0" max="1" step="0.05">
+                <label for="smoothing">Smoothing (0-1)</label>
+                <input id="smoothing" type="number" min="0" max="1" step="0.05">
               </div>
             </div>
 
-            <div id="sensorConfigList" class="sensor-list"></div>
+            <div class="actions">
+              <button class="button secondary" type="button" id="addSensorButton">Add sensor</button>
+              <button class="button secondary" type="button" id="autoLabelButton">Auto label</button>
+            </div>
 
-            <div class="config-actions">
-              <button class="button" type="submit">설정 저장</button>
-              <button class="button secondary" type="button" id="reloadConfigButton">현재값 다시 불러오기</button>
+            <div id="sensorConfigList" class="list"></div>
+
+            <div class="actions">
+              <button class="button" type="submit">Save setup</button>
+              <button class="button secondary" type="button" id="reloadConfigButton">Reload</button>
               <span id="configStatus" class="status"></span>
             </div>
           </form>
-        </section>
+          </div>
+        </details>
+
+        <details class="panel">
+          <summary>Firmware Flash</summary>
+          <div class="panel-body">
+          <div class="form">
+            <div class="grid-2">
+              <div class="field">
+                <label for="portSelect">COM port</label>
+                <select id="portSelect"></select>
+              </div>
+              <div class="field">
+                <label for="flashSensorId">Sensor ID</label>
+                <input id="flashSensorId" placeholder="sensor-a">
+              </div>
+              <div class="field">
+                <label for="wifiSsid">Wi-Fi SSID</label>
+                <input id="wifiSsid" value="csi-wifi">
+              </div>
+              <div class="field">
+                <label for="wifiPassword">Wi-Fi password</label>
+                <input id="wifiPassword" type="password" value="00000000">
+              </div>
+              <div class="field">
+                <label for="serverHost">Server host</label>
+                <input id="serverHost">
+              </div>
+              <div class="field">
+                <label for="fqbn">Board FQBN</label>
+                <input id="fqbn" value="esp32:esp32:esp32s3">
+              </div>
+            </div>
+            <div class="actions">
+              <button class="button secondary" type="button" id="refreshPortsButton">Refresh ports</button>
+              <button class="button" type="button" id="flashButton">Flash selected port</button>
+              <span id="flashStatus" class="status"></span>
+            </div>
+            <pre id="flashOutput" hidden></pre>
+          </div>
+          </div>
+        </details>
+
+        <details class="panel" open>
+          <summary>Calibration Samples</summary>
+          <div class="panel-body">
+          <div class="calibration-grid" id="calibrationButtons"></div>
+          <p class="status" id="calibrationStatus"></p>
+          </div>
+        </details>
       </aside>
     </section>
   </main>
@@ -304,30 +362,57 @@
     const sensorList = document.getElementById("sensorList");
     const positionValue = document.getElementById("positionValue");
     const confidenceValue = document.getElementById("confidenceValue");
+    const calibrationValue = document.getElementById("calibrationValue");
+    const methodValue = document.getElementById("methodValue");
     const configForm = document.getElementById("configForm");
     const sensorConfigList = document.getElementById("sensorConfigList");
-    const reloadConfigButton = document.getElementById("reloadConfigButton");
     const configStatus = document.getElementById("configStatus");
+    const calibrationButtons = document.getElementById("calibrationButtons");
+    const calibrationStatus = document.getElementById("calibrationStatus");
+    const portSelect = document.getElementById("portSelect");
+    const flashStatus = document.getElementById("flashStatus");
+    const flashOutput = document.getElementById("flashOutput");
 
     let lastState = null;
-    let configFormSensorIds = "";
+    let configFormSensorSignature = "";
+    let flashJobTimer = null;
+
+    async function api(path, options = {}) {
+      const response = await fetch(path, {
+        cache: "no-store",
+        ...options,
+        headers: {
+          "Content-Type": "application/json",
+          ...(options.headers || {}),
+        },
+      });
+      const body = await response.json();
+      if (!response.ok || body.ok === false) {
+        throw new Error(body.error || `HTTP ${response.status}`);
+      }
+      return body;
+    }
 
     async function loadState() {
-      const response = await fetch("/api/state", { cache: "no-store" });
-      return response.json();
+      return api("/api/state");
     }
 
     async function saveConfig(payload) {
-      const response = await fetch("/api/config", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify(payload),
-      });
-      const result = await response.json();
-      if (!response.ok && result.ok !== false) {
-        result.ok = false;
-      }
-      return result;
+      return api("/api/config", { method: "POST", body: JSON.stringify(payload) });
+    }
+
+    async function saveCalibration(payload) {
+      return api("/api/calibration", { method: "POST", body: JSON.stringify(payload) });
+    }
+
+    function calibrationTargets(room) {
+      return [
+        { label: "center", text: "Center", x_cm: Math.round(room.width_cm / 2), y_cm: Math.round(room.height_cm / 2) },
+        { label: "top-left", text: "Top left", x_cm: 0, y_cm: 0 },
+        { label: "top-right", text: "Top right", x_cm: room.width_cm, y_cm: 0 },
+        { label: "bottom-right", text: "Bottom right", x_cm: room.width_cm, y_cm: room.height_cm },
+        { label: "bottom-left", text: "Bottom left", x_cm: 0, y_cm: room.height_cm },
+      ];
     }
 
     function drawRoom(state) {
@@ -363,6 +448,16 @@
       ctx.lineWidth = 3;
       ctx.strokeRect(padding, padding, width, height);
 
+      for (const target of calibrationTargets(room)) {
+        const x = padding + target.x_cm * scaleX;
+        const y = padding + target.y_cm * scaleY;
+        ctx.beginPath();
+        ctx.strokeStyle = "rgba(217, 72, 15, 0.35)";
+        ctx.lineWidth = 2;
+        ctx.arc(x, y, 5, 0, Math.PI * 2);
+        ctx.stroke();
+      }
+
       for (const sensor of state.sensors) {
         const x = padding + sensor.x_cm * scaleX;
         const y = padding + sensor.y_cm * scaleY;
@@ -382,18 +477,16 @@
 
         ctx.fillStyle = "#172019";
         ctx.font = "14px Segoe UI";
-        ctx.fillText(sensor.id, x + 12, y - 12);
+        ctx.fillText(sensor.label || sensor.id, x + 12, y - 12);
       }
 
       if (state.estimate) {
         const px = padding + state.estimate.x_cm * scaleX;
         const py = padding + state.estimate.y_cm * scaleY;
-
         ctx.beginPath();
         ctx.fillStyle = "#d9480f";
         ctx.arc(px, py, 10, 0, Math.PI * 2);
         ctx.fill();
-
         ctx.beginPath();
         ctx.strokeStyle = "rgba(217, 72, 15, 0.25)";
         ctx.lineWidth = 18;
@@ -404,22 +497,25 @@
 
     function renderSensors(state) {
       sensorList.innerHTML = "";
+      if (!state.sensors.length) {
+        sensorList.innerHTML = '<p class="empty">No sensors yet. A sensor is added automatically when the first POST arrives.</p>';
+        return;
+      }
 
       for (const sensor of state.sensors) {
         const card = document.createElement("div");
-        card.className = "sensor-card";
-
+        card.className = "card";
         const live = sensor.age_ms !== null && sensor.age_ms < 3000;
         card.innerHTML = `
-          <div class="sensor-head">
-            <span>${sensor.id}</span>
+          <div class="head">
+            <span>${sensor.label || sensor.id} <span class="meta">(${sensor.id})</span></span>
             <span class="badge ${live ? "live" : "offline"}">${live ? "LIVE" : "OFFLINE"}</span>
           </div>
-          <p class="meta">위치: (${sensor.x_cm}, ${sensor.y_cm}) cm</p>
-          <p class="meta">존재 감지: ${sensor.present ? "예" : "아니오"}</p>
-          <p class="meta">이동 거리: ${sensor.moving_distance_cm} cm / 에너지 ${sensor.moving_energy}</p>
-          <p class="meta">정지 거리: ${sensor.stationary_distance_cm} cm / 에너지 ${sensor.stationary_energy}</p>
-          <p class="meta">사용 거리: ${sensor.selected_distance_cm ?? "-"}</p>
+          <p class="meta">Position: (${sensor.x_cm}, ${sensor.y_cm}) cm</p>
+          <p class="meta">Remote IP: ${sensor.last_remote_ip || "-"}</p>
+          <p class="meta">Presence: ${sensor.present ? "yes" : "no"}</p>
+          <p class="meta">Moving: ${sensor.moving_distance_cm} cm / energy ${sensor.moving_energy}</p>
+          <p class="meta">Stationary: ${sensor.stationary_distance_cm} cm / energy ${sensor.stationary_energy}</p>
         `;
         sensorList.appendChild(card);
       }
@@ -427,13 +523,24 @@
 
     function renderSummary(state) {
       if (!state.estimate) {
-        positionValue.textContent = "대기 중";
+        positionValue.textContent = "Waiting";
         confidenceValue.textContent = "-";
+        calibrationValue.textContent = `${state.calibration?.sample_count || 0} samples`;
+        methodValue.textContent = "-";
         return;
       }
-
       positionValue.textContent = `${state.estimate.x_cm} cm, ${state.estimate.y_cm} cm`;
       confidenceValue.textContent = `${Math.round(state.estimate.confidence * 100)}%`;
+      calibrationValue.textContent = `${state.calibration?.sample_count || 0} samples`;
+      methodValue.textContent = state.estimate.method || "-";
+    }
+
+    function sensorSignature(state) {
+      return state.sensors.map((sensor) => `${sensor.id}:${sensor.label}:${sensor.x_cm}:${sensor.y_cm}`).join("|");
+    }
+
+    function shouldRenderConfigForm(state) {
+      return !lastState || configFormSensorSignature !== sensorSignature(state);
     }
 
     function renderConfigForm(state) {
@@ -444,49 +551,56 @@
 
       sensorConfigList.innerHTML = "";
       for (const sensor of state.sensors) {
-        const block = document.createElement("div");
-        block.className = "sensor-card";
-        block.innerHTML = `
-          <div class="sensor-head">
-            <span>${sensor.id}</span>
-          </div>
-          <div class="config-grid sensor-grid">
-            <div class="field">
-              <label for="${sensor.id}-x">X 위치 (cm)</label>
-              <input id="${sensor.id}-x" type="number" step="1" value="${sensor.x_cm}">
-            </div>
-            <div class="field">
-              <label for="${sensor.id}-y">Y 위치 (cm)</label>
-              <input id="${sensor.id}-y" type="number" step="1" value="${sensor.y_cm}">
-            </div>
-            <div class="field">
-              <label>ID</label>
-              <input type="text" value="${sensor.id}" disabled>
-            </div>
-          </div>
-        `;
-        sensorConfigList.appendChild(block);
+        addSensorConfigRow(sensor);
       }
-      configFormSensorIds = getSensorIdSignature(state);
+      configFormSensorSignature = sensorSignature(state);
     }
 
-    function getSensorIdSignature(state) {
-      return state.sensors.map((sensor) => sensor.id).join("|");
+    function addSensorConfigRow(sensor = {}) {
+      const id = sensor.id || nextSensorId();
+      const label = sensor.label || id;
+      const block = document.createElement("div");
+      block.className = "card sensor-config-row";
+      block.dataset.sensorId = id;
+      block.innerHTML = `
+        <div class="head">
+          <span>${id}</span>
+          <button class="button danger" type="button">Delete</button>
+        </div>
+        <div class="grid-3">
+          <div class="field">
+            <label>Label</label>
+            <input data-field="label" value="${label}">
+          </div>
+          <div class="field">
+            <label>X cm</label>
+            <input data-field="x_cm" type="number" step="1" value="${sensor.x_cm ?? 30}">
+          </div>
+          <div class="field">
+            <label>Y cm</label>
+            <input data-field="y_cm" type="number" step="1" value="${sensor.y_cm ?? 30}">
+          </div>
+        </div>
+      `;
+      block.querySelector(".button.danger").addEventListener("click", () => block.remove());
+      sensorConfigList.appendChild(block);
     }
 
-    function shouldRenderConfigForm(state) {
-      if (!lastState) {
-        return true;
+    function nextSensorId() {
+      const ids = new Set([...sensorConfigList.querySelectorAll(".sensor-config-row")].map((row) => row.dataset.sensorId));
+      let index = ids.size + 1;
+      while (ids.has(`sensor-${index}`)) {
+        index += 1;
       }
-
-      return configFormSensorIds !== getSensorIdSignature(state);
+      return `sensor-${index}`;
     }
 
     function collectConfigPayload() {
-      const sensors = lastState.sensors.map((sensor) => ({
-        id: sensor.id,
-        x_cm: Number(document.getElementById(`${sensor.id}-x`).value),
-        y_cm: Number(document.getElementById(`${sensor.id}-y`).value),
+      const sensors = [...sensorConfigList.querySelectorAll(".sensor-config-row")].map((row) => ({
+        id: row.dataset.sensorId,
+        label: row.querySelector('[data-field="label"]').value,
+        x_cm: Number(row.querySelector('[data-field="x_cm"]').value),
+        y_cm: Number(row.querySelector('[data-field="y_cm"]').value),
       }));
 
       return {
@@ -500,15 +614,111 @@
       };
     }
 
+    function renderCalibrationButtons(state) {
+      calibrationButtons.innerHTML = "";
+      for (const target of calibrationTargets(state.room)) {
+        const button = document.createElement("button");
+        button.className = "button secondary";
+        button.type = "button";
+        button.textContent = `${target.text} sample`;
+        button.addEventListener("click", () => captureCalibration(target));
+        calibrationButtons.appendChild(button);
+      }
+    }
+
+    async function captureCalibration(target) {
+      calibrationStatus.textContent = `Saving ${target.text} sample...`;
+      try {
+        await saveCalibration({ label: target.label, target: { x_cm: target.x_cm, y_cm: target.y_cm } });
+        calibrationStatus.textContent = `${target.text} sample saved`;
+        lastState = null;
+        await tick();
+      } catch (error) {
+        calibrationStatus.textContent = `Save failed: ${error.message}`;
+      }
+    }
+
+    async function refreshPorts() {
+      try {
+        const result = await api("/api/ports");
+        portSelect.innerHTML = "";
+        for (const port of result.ports) {
+          const option = document.createElement("option");
+          option.value = port.port;
+          option.textContent = `${port.port} - ${port.name || port.description || "Serial port"}`;
+          portSelect.appendChild(option);
+        }
+        if (!result.ports.length) {
+          const option = document.createElement("option");
+          option.value = "";
+          option.textContent = "No serial ports found";
+          portSelect.appendChild(option);
+        }
+        document.getElementById("serverHost").value = result.server_host || "";
+        flashStatus.textContent = result.arduino_cli ? "Ports refreshed" : "Arduino CLI not found";
+      } catch (error) {
+        flashStatus.textContent = `Port scan failed: ${error.message}`;
+      }
+    }
+
+    async function startFlash() {
+      const payload = {
+        port: portSelect.value,
+        sensor_id: document.getElementById("flashSensorId").value.trim(),
+        wifi_ssid: document.getElementById("wifiSsid").value,
+        wifi_password: document.getElementById("wifiPassword").value,
+        server_host: document.getElementById("serverHost").value,
+        fqbn: document.getElementById("fqbn").value,
+      };
+
+      flashOutput.hidden = true;
+      flashOutput.textContent = "";
+      flashStatus.textContent = "Queued...";
+
+      try {
+        const result = await api("/api/firmware", { method: "POST", body: JSON.stringify(payload) });
+        pollFlashJob(result.job_id);
+      } catch (error) {
+        flashStatus.textContent = `Flash failed: ${error.message}`;
+      }
+    }
+
+    function pollFlashJob(jobId) {
+      if (flashJobTimer) {
+        clearInterval(flashJobTimer);
+      }
+
+      flashJobTimer = setInterval(async () => {
+        try {
+          const result = await api(`/api/firmware/${jobId}`);
+          const job = result.job;
+          flashStatus.textContent = `Firmware: ${job.status}`;
+          if (job.output || job.error) {
+            flashOutput.hidden = false;
+            flashOutput.textContent = `${job.error || ""}\n${job.output || ""}`.trim();
+          }
+          if (job.status === "done" || job.status === "failed") {
+            clearInterval(flashJobTimer);
+            flashJobTimer = null;
+          }
+        } catch (error) {
+          flashStatus.textContent = `Job check failed: ${error.message}`;
+          clearInterval(flashJobTimer);
+          flashJobTimer = null;
+        }
+      }, 1200);
+    }
+
     async function tick() {
       try {
         const state = await loadState();
-        const shouldRenderConfig = shouldRenderConfigForm(state);
+        const renderConfig = shouldRenderConfigForm(state);
         lastState = state;
         drawRoom(state);
         renderSensors(state);
         renderSummary(state);
-        if (shouldRenderConfig) {
+        renderCalibrationButtons(state);
+        if (renderConfig) {
           renderConfigForm(state);
         }
       } catch (error) {
@@ -518,35 +728,40 @@
 
     configForm.addEventListener("submit", async (event) => {
       event.preventDefault();
-      if (!lastState) {
-        return;
-      }
-
-      configStatus.textContent = "저장 중...";
+      configStatus.textContent = "Saving...";
       try {
-        const result = await saveConfig(collectConfigPayload());
-        if (!result.ok) {
-          configStatus.textContent = `저장 실패: ${result.error}`;
-          return;
-        }
-
-        configStatus.textContent = "저장 완료";
+        await saveConfig(collectConfigPayload());
+        configStatus.textContent = "Saved";
         lastState = null;
         await tick();
       } catch (error) {
-        console.error(error);
-        configStatus.textContent = "저장 실패";
+        configStatus.textContent = `Save failed: ${error.message}`;
       }
     });
 
-    reloadConfigButton.addEventListener("click", async () => {
-      configStatus.textContent = "현재값 다시 불러오는 중...";
+    document.getElementById("addSensorButton").addEventListener("click", () => addSensorConfigRow());
+    document.getElementById("reloadConfigButton").addEventListener("click", async () => {
+      configStatus.textContent = "Reloading...";
       lastState = null;
       await tick();
-      configStatus.textContent = "현재값 반영됨";
+      configStatus.textContent = "Reloaded";
     });
+    document.getElementById("autoLabelButton").addEventListener("click", async () => {
+      configStatus.textContent = "Auto labeling...";
+      try {
+        await api("/api/auto-label", { method: "POST", body: "{}" });
+        lastState = null;
+        await tick();
+        configStatus.textContent = "Auto labels applied";
+      } catch (error) {
+        configStatus.textContent = `Auto label failed: ${error.message}`;
+      }
+    });
+    document.getElementById("refreshPortsButton").addEventListener("click", refreshPorts);
+    document.getElementById("flashButton").addEventListener("click", startFlash);
 
     tick();
+    refreshPorts();
     setInterval(tick, 500);
   </script>
 </body>

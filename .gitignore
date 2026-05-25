@@ -1,2 +1,4 @@
 server/config.json
 server/__pycache__/
+server/.flash_work/
+server/calibration_samples.jsonl
